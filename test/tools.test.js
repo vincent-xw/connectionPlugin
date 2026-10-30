@@ -38,7 +38,7 @@ function fakeDocs(overrides = {}) {
         description: 'A test platform',
         refExample: 'fake:d1',
         default: true,
-        capabilities: { read: true, create: true, append: true, insert: true, replace: true, custom: true, auth: true, tabs: true, revisions: true },
+        capabilities: { read: true, list: true, create: true, append: true, insert: true, replace: true, custom: true, auth: true, tabs: true, revisions: true },
         auth: { supported: true, connected: true, account: 'default', expiresAt: '2030-01-01T00:00:00.000Z' },
       }]
     },
@@ -54,8 +54,21 @@ function fakeDocs(overrides = {}) {
         truncated: false,
       }
     },
+    async list(request) {
+      calls.push(['list', request])
+      return {
+        platform: 'fake',
+        documents: [
+          { documentId: 'd1', title: 'Doc One', url: 'fake://d1', modifiedTime: '2026-10-01T09:00:00.000Z' },
+        ],
+        nextPageToken: 'page-2',
+      }
+    },
     async create(request) {
       calls.push(['create', request])
+      if (request.kind === 'spreadsheet') {
+        return { platform: 'fake', documentId: 'd3', url: 'fake://d3', tabs: ['Sheet1', 'Sheet2'] }
+      }
       return { platform: 'fake', documentId: 'd2', url: 'fake://d2', revision: 'r-2', tab: 't.0' }
     },
     async append(request) {
@@ -69,6 +82,22 @@ function fakeDocs(overrides = {}) {
     async replace(request) {
       calls.push(['replace', request])
       return { platform: 'fake', documentId: 'd1', revision: 'r-5', occurrencesChanged: 2 }
+    },
+    async updateValues(request) {
+      calls.push(['updateValues', request])
+      return { platform: 'fake', documentId: 'd1', range: 'Sheet1!A1:B1', updatedRows: 1, updatedColumns: 2, updatedCells: 2 }
+    },
+    async appendValues(request) {
+      calls.push(['appendValues', request])
+      return { platform: 'fake', documentId: 'd1', range: "'Sheet1'!A5:B5", updatedRows: 1, updatedCells: 2 }
+    },
+    async formatSheet(request) {
+      calls.push(['formatSheet', request])
+      return { platform: 'fake', documentId: 'd1', replies: request.requests.map(() => ({})) }
+    },
+    async insertSlideText(request) {
+      calls.push(['insertSlideText', request])
+      return { platform: 'fake', documentId: 'd1', slide: 'slide-1', shape: 'shape-1', insertedChars: 3 }
     },
     async connect(request) {
       calls.push(['connect', request])
@@ -95,12 +124,17 @@ test('tools: registers read-only, write, and invoke tools', () => {
     'docs_disconnect',
     'docs_insert',
     'docs_invoke',
+    'docs_list',
     'docs_platforms',
     'docs_read',
     'docs_replace',
+    'docs_sheet_append',
+    'docs_sheet_format',
+    'docs_sheet_update',
+    'docs_slide_insert_text',
   ])
   const readOnly = capture({ readOnly: true }, fakeDocs().service)
-  assert.deepEqual([...readOnly.defs.keys()].sort(), ['docs_connect', 'docs_disconnect', 'docs_platforms', 'docs_read'])
+  assert.deepEqual([...readOnly.defs.keys()].sort(), ['docs_connect', 'docs_disconnect', 'docs_list', 'docs_platforms', 'docs_read'])
 })
 
 test('tools: schemas are valid JSON Schema with hoisted required arrays', () => {
@@ -158,6 +192,27 @@ test('tools: docs_read forwards options and renders the revision hint', async ()
   assert.match(content.text, /revision: r-1/)
   assert.match(content.text, /expectedRevision: r-1/)
   assert.match(content.text, /hello/)
+})
+
+test('tools: docs_list forwards paging and renders the next page token', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const definition = defs.get('docs_list')
+  const value = await definition.execute(
+    { platform: 'fake', limit: 5, pageToken: 'page-1', query: 'Doc', account: 'work' },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(calls[0][0], 'list')
+  assert.equal(calls[0][1].limit, 5)
+  assert.equal(calls[0][1].pageToken, 'page-1')
+  assert.equal(calls[0][1].query, 'Doc')
+  assert.equal(calls[0][1].account, 'work')
+  assert.equal(value.documents.length, 1)
+  const [content] = definition.output.render({}, value)
+  assert.match(content.text, /--- documents ---/)
+  assert.match(content.text, /1\. Doc One/)
+  assert.match(content.text, /document: d1/)
+  assert.match(content.text, /pageToken "page-2"/)
 })
 
 test('tools: docs_connect renders a clickable pending authorization', async () => {
@@ -232,4 +287,114 @@ test('tools: prompt guidance is registered only when docs_read is visible', () =
   defs.delete('docs_read')
   assert.equal(sections[0].text({ scope: undefined }), '')
   assert.equal(ctx.tools.get('docs_read'), undefined)
+})
+
+test('tools: sheet writes forward the range and values and render the result', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const update = defs.get('docs_sheet_update')
+  const updated = await update.execute(
+    { document: 'fake:d1', range: 'Sheet1!A1:B1', values: [['a', 'b']] },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(calls[0][0], 'updateValues')
+  assert.equal(calls[0][1].range, 'Sheet1!A1:B1')
+  assert.deepEqual(calls[0][1].values, [['a', 'b']])
+  const [updateContent] = update.output.render({}, updated)
+  assert.match(updateContent.text, /sheet_update: ok/)
+  assert.match(updateContent.text, /range: Sheet1!A1:B1/)
+  assert.match(updateContent.text, /cells: 2/)
+
+  const append = defs.get('docs_sheet_append')
+  const appended = await append.execute(
+    { document: 'fake:d1', values: [['c', 'd']] },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(calls[1][0], 'appendValues')
+  assert.equal(calls[1][1].range, undefined)
+  const [appendContent] = append.output.render({}, appended)
+  assert.match(appendContent.text, /sheet_append: ok/)
+  assert.match(appendContent.text, /rows: 1/)
+})
+
+test('tools: sheet writes require values', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  await assert.rejects(
+    () => defs.get('docs_sheet_update').execute({ document: 'fake:d1', range: 'A1' }, { signal: new AbortController().signal }),
+    /values is required/,
+  )
+  assert.equal(calls.length, 0)
+})
+
+test('tools: docs_slide_insert_text forwards the slide and text', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const definition = defs.get('docs_slide_insert_text')
+  const value = await definition.execute(
+    { document: 'fake:d1', slide: '2', text: 'note' },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(calls[0][0], 'insertSlideText')
+  assert.equal(calls[0][1].slide, '2')
+  assert.equal(calls[0][1].text, 'note')
+  const [content] = definition.output.render({}, value)
+  assert.match(content.text, /slide_insert_text: ok/)
+  assert.match(content.text, /inserted chars: 3/)
+})
+
+test('tools: docs_create forwards a spreadsheet kind and its sheets', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const definition = defs.get('docs_create')
+  const value = await definition.execute(
+    {
+      title: 'Q4 导入',
+      kind: 'spreadsheet',
+      sheets: [{ title: 'Sheet1', values: [['a']] }],
+    },
+    { signal: new AbortController().signal },
+  )
+  assert.equal(calls[0][0], 'create')
+  assert.equal(calls[0][1].kind, 'spreadsheet')
+  assert.deepEqual(calls[0][1].sheets, [{ title: 'Sheet1', values: [['a']] }])
+  const [content] = definition.output.render({}, value)
+  assert.match(content.text, /created: ok/)
+  assert.match(content.text, /sheets: Sheet1 \| Sheet2/)
+})
+
+test('tools: docs_sheet_format forwards raw requests and counts replies', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const definition = defs.get('docs_sheet_format')
+  const requests = [{ repeatCell: { range: { sheetId: 0 } } }, { mergeCells: { range: { sheetId: 0 } } }]
+  const value = await definition.execute({ document: 'fake:d1', requests }, { signal: new AbortController().signal })
+  assert.equal(calls[0][0], 'formatSheet')
+  assert.equal(calls[0][1].requests.length, 2)
+  const [content] = definition.output.render({}, value)
+  assert.match(content.text, /sheet_format: ok/)
+  assert.match(content.text, /replies: 2/)
+})
+
+test('tools: docs_sheet_format can load a manifest from a file', async () => {
+  const { service, calls } = fakeDocs()
+  const { defs } = capture({}, service)
+  const { writeFile, unlink } = await import('node:fs/promises')
+  const file = new URL('./.tmp-format-manifest.json', import.meta.url)
+  await writeFile(file, JSON.stringify([{ repeatCell: { range: { sheetId: 0 } } }]))
+  try {
+    await defs.get('docs_sheet_format').execute(
+      { document: 'fake:d1', requestsFile: decodeURIComponent(file.pathname) },
+      { signal: new AbortController().signal },
+    )
+    assert.equal(calls[0][0], 'formatSheet')
+    assert.equal(calls[0][1].requests.length, 1)
+  } finally {
+    await unlink(file)
+  }
+
+  await assert.rejects(
+    () => defs.get('docs_sheet_format').execute({ document: 'fake:d1', requests: [], requestsFile: 'x.json' }, { signal: new AbortController().signal }),
+    /either requests or requestsFile/,
+  )
 })

@@ -34,7 +34,9 @@ https://docs.google.com/document/d/{documentId}/edit
 5. 下载/保存客户端配置。妥善保护 `client_id`、服务端 `client_secret`（如适用）、授权产生的 Token；不要提交真实 Token 到代码仓库。
 6. 如果应用处于 External + Testing 状态，添加测试用户，确保用于授权的账号具备测试资格。
 
-> 仅接入指定文档的读取和编辑，不需要同时启用 Google Drive API。本文不设计文件列表/搜索能力。
+> 仅接入指定文档的读取和编辑时，不需要同时启用 Google Drive API。若还要读写 Google 表格 / 幻灯片，则需同时启用 **Google Sheets API** / **Google Slides API** 并申请 `spreadsheets` / `presentations` scope。
+>
+> **实现现状（与本文设计稿的差异）**：本连接器的 Google adapter 额外提供 `docs_list`，通过 Drive `files.list`（`drive.metadata.readonly`，只读 metadata）列出账号下的 Google Docs。要做到这一点需要在项目里启用 **Google Drive API**，并在授权 scope 中加上该项；不想要该能力时删除该 scope 即可（`docs_list` 会明确报 scope 不足）。
 
 参考：[Google Docs 身份验证与权限](https://developers.google.com/workspace/docs/api/auth)、[Desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)、[配置 OAuth consent](https://developers.google.com/workspace/docs/api/quickstart/js)。
 
@@ -47,6 +49,7 @@ https://docs.google.com/document/d/{documentId}/edit
 | `https://www.googleapis.com/auth/documents.readonly` | 读取用户可访问的 Google Docs | 仅查看 |
 | `https://www.googleapis.com/auth/documents` | 读取、创建与编辑用户可访问的 Google Docs | 按任意已授权文档 ID 读写，最直观 |
 | `https://www.googleapis.com/auth/drive.file` | 访问由应用创建或经适当授权机制交给应用使用的特定文件 | 希望采用更小的逐文件授权范围 |
+| `https://www.googleapis.com/auth/drive.metadata.readonly` | 只读文件 metadata（id、名称、类型、修改时间） | `docs_list` 列文档；本项目默认申请 |
 
 **重要区别**：`drive.file` 并不表示“用户只要知道某个文档 ID，应用就一定有访问权限”。既有文件需要通过 Google 支持的授权/选择流程让应用获得该文件的访问权。若需求是操作用户已有的任意文档 ID，可评估 `documents` scope，并接受其敏感权限的验证要求。
 

@@ -32,10 +32,19 @@
         # or leave empty to follow HTTPS_PROXY/HTTP_PROXY/ALL_PROXY.
         proxy: http://127.0.0.1:7897
         proxyFromEnv: true
-        # Scopes requested on the first authorization.  `documents` is required
-        # for create/edit; use `documents.readonly` for a read-only deployment.
+        # Scopes requested on the first authorization.  `documents` covers Docs,
+        # `spreadsheets` covers Sheets cells, `presentations` covers Slides, and
+        # `drive.metadata.readonly` covers docs_list plus id→kind resolution.
+        # Drop the Drive scope to disable listing (the capability then fails
+        # with a scope hint instead of widening the grant).
         scopes:
           - https://www.googleapis.com/auth/documents
+          - https://www.googleapis.com/auth/spreadsheets
+          - https://www.googleapis.com/auth/presentations
+          - https://www.googleapis.com/auth/drive.metadata.readonly
+        # Drive lives on a different host than the Docs API.  Override only for
+        # a proxy or a test double.
+        driveApiBase: https://www.googleapis.com
         # 0 lets the OS pick a free loopback port (recommended for Desktop
         # app clients).  Set a fixed port when the OAuth client requires a
         # pre-registered http://127.0.0.1:<port> redirect.

@@ -5,7 +5,7 @@ import { MemoryCredentials, fakeContext, testLogger } from './support/memory-cre
 import { GoogleAuth } from '../lib/adapters/google/auth.js'
 import { GoogleApi } from '../lib/adapters/google/client.js'
 import { createGoogleAdapter } from '../lib/adapters/google/index.js'
-import { DOCUMENTS_SCOPE, resolveGoogleConfig } from '../lib/adapters/google/config.js'
+import { DOCUMENTS_SCOPE, DRIVE_METADATA_READONLY_SCOPE, GOOGLE_DEFAULT_CONFIG, PRESENTATIONS_SCOPE, SPREADSHEETS_SCOPE, resolveGoogleConfig } from '../lib/adapters/google/config.js'
 import { DOCS_ERROR, DocsError } from '../lib/core/errors.js'
 
 const CLIENT_ID = 'client-1'
@@ -19,6 +19,9 @@ async function setup(google, overrides = {}, t, fetchImpl = globalThis.fetch) {
     clientSecret: 'secret-1',
     scopes: [DOCUMENTS_SCOPE],
     apiBase: google.baseUrl,
+    driveApiBase: google.baseUrl,
+    sheetsApiBase: google.baseUrl,
+    slidesApiBase: google.baseUrl,
     authEndpoint: `${google.baseUrl}/auth`,
     tokenEndpoint: `${google.baseUrl}/token`,
     revokeEndpoint: `${google.baseUrl}/revoke`,
@@ -174,6 +177,21 @@ test('Google Docs adapter: create with a tab title writes into the new tab', asy
   assert.equal(document.tabs[0].text, '\n')
 })
 
+test('Google Docs adapter: status marks an open flow even when a grant exists', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth } = await setup(google, {}, t)
+  await authorize(google, auth)
+  const settled = await auth.status({})
+  assert.equal(settled.connected, true)
+  assert.equal(settled.flowPending, false)
+
+  await auth.start({})
+  const pending = await auth.status({})
+  assert.equal(pending.connected, true)
+  assert.equal(pending.flowPending, true)
+})
+
 test('Google Docs adapter: rejects a callback with a mismatched state', async (t) => {
   const google = await startFakeGoogle()
   t.after(() => google.close())
@@ -302,4 +320,438 @@ test('Google Docs adapter: re-reads the revision when batchUpdate omits writeCon
   const appended = await adapter.append(DOC_REF, { text: 'no revision echoed' })
   assert.equal(appended.revision, 'rev-2')
   google.settings.omitWriteControl = false
+})
+
+test('Google Docs adapter: lists Google Docs documents with paging and a title filter', async (t) => {
+  const google = await startFakeGoogle({
+    files: [
+      { id: 'doc-a', name: 'Alpha notes', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-02T00:00:00.000Z' },
+      { id: 'doc-b', name: 'Beta plan', mimeType: 'application/vnd.google-apps.document' },
+      { id: 'sheet-1', name: 'Alpha sheet', mimeType: 'application/vnd.google-apps.spreadsheet' },
+    ],
+  })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const first = await adapter.list({ limit: 1 })
+  assert.equal(first.platform, 'google-docs')
+  assert.equal(first.documents.length, 1)
+  assert.equal(first.documents[0].documentId, 'doc-a')
+  assert.equal(first.documents[0].title, 'Alpha notes')
+  assert.equal(first.documents[0].mimeType, 'application/vnd.google-apps.document')
+  assert.equal(first.documents[0].modifiedTime, '2026-10-02T00:00:00.000Z')
+  assert.match(first.documents[0].url, /document\/d\/doc-a\/edit/)
+  assert.equal(first.nextPageToken, '1')
+
+  const second = await adapter.list({ limit: 1, pageToken: first.nextPageToken })
+  assert.deepEqual(second.documents.map((doc) => doc.documentId), ['doc-b'])
+  assert.equal(second.nextPageToken, undefined)
+
+  const filtered = await adapter.list({ query: "alph'a" })
+  assert.deepEqual(filtered.documents, [])
+  const request = google.driveRequests.at(-1)
+  assert.match(request.q, /mimeType = 'application\/vnd\.google-apps\.document'/)
+  assert.match(request.q, /trashed = false/)
+  assert.match(request.q, /name contains 'alph\\'a'/)
+  assert.equal(request.orderBy, 'modifiedTime desc')
+  assert.match(request.fields, /nextPageToken/)
+})
+
+test('Google Docs adapter: lists Google Sheets and every native kind on request', async (t) => {
+  const google = await startFakeGoogle({
+    files: [
+      { id: 'doc-a', name: 'Doc A', mimeType: 'application/vnd.google-apps.document' },
+      { id: 'sheet-a', name: 'Sheet A', mimeType: 'application/vnd.google-apps.spreadsheet', modifiedTime: '2026-10-03T00:00:00.000Z' },
+      { id: 'deck-a', name: 'Deck A', mimeType: 'application/vnd.google-apps.presentation' },
+      { id: 'xlsx-a', name: 'Uploaded sheet', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' },
+    ],
+  })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const sheets = await adapter.list({ type: 'spreadsheet' })
+  assert.deepEqual(sheets.documents.map((doc) => doc.documentId), ['sheet-a'])
+  assert.equal(sheets.documents[0].mimeType, 'application/vnd.google-apps.spreadsheet')
+  assert.match(sheets.documents[0].url, /\/spreadsheets\/d\/sheet-a\/edit/)
+  assert.match(google.driveRequests.at(-1).q, /mimeType = 'application\/vnd\.google-apps\.spreadsheet'/)
+
+  const all = await adapter.list({ type: 'all' })
+  assert.deepEqual(all.documents.map((doc) => doc.documentId).sort(), ['deck-a', 'doc-a', 'sheet-a'])
+  const query = google.driveRequests.at(-1).q
+  assert.match(query, /\(mimeType = '.*document' or mimeType = '.*spreadsheet' or mimeType = '.*presentation'\)/)
+
+  await assert.rejects(
+    () => adapter.list({ type: 'folder' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.hint, /document, spreadsheet, presentation, all/)
+      return true
+    },
+  )
+})
+
+test('Google adapter: default scopes cover Docs, Sheets, Slides, and metadata', () => {
+  assert.deepEqual(GOOGLE_DEFAULT_CONFIG.scopes, [
+    DOCUMENTS_SCOPE,
+    SPREADSHEETS_SCOPE,
+    PRESENTATIONS_SCOPE,
+    DRIVE_METADATA_READONLY_SCOPE,
+  ])
+  assert.equal(GOOGLE_DEFAULT_CONFIG.driveApiBase, 'https://www.googleapis.com')
+  assert.equal(GOOGLE_DEFAULT_CONFIG.sheetsApiBase, 'https://sheets.googleapis.com')
+  assert.equal(GOOGLE_DEFAULT_CONFIG.slidesApiBase, 'https://slides.googleapis.com')
+})
+
+test('Google Docs adapter: a disabled API is reported as configuration, not permission', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  google.failures.push({
+    method: 'GET',
+    path: /^\/drive\/v3\/files/,
+    status: 403,
+    body: {
+      error: {
+        code: 403,
+        message: 'Google Drive API has not been used in project 123 before or it is disabled.',
+        status: 'PERMISSION_DENIED',
+        errors: [{ reason: 'accessNotConfigured', message: 'Access Not Configured' }],
+      },
+    },
+  })
+  await assert.rejects(
+    () => adapter.list({}),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.NOT_CONFIGURED)
+      assert.match(error.hint, /Google Drive API/)
+      return true
+    },
+  )
+})
+
+test('Google Docs adapter: a token without the Drive scope reports the scope gap', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  google.settings.driveForbidden = true
+  await assert.rejects(
+    () => adapter.list({}),
+    (error) => {
+      assert.ok(error instanceof DocsError)
+      assert.equal(error.code, DOCS_ERROR.FORBIDDEN)
+      assert.match(error.hint, /drive\.metadata\.readonly/)
+      return true
+    },
+  )
+})
+
+test('Google Docs adapter: docs_invoke listDocuments reaches the same listing', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  const result = await adapter.invoke(null, { action: 'listDocuments', payload: { limit: 10 } })
+  assert.equal(result.platform, 'google-docs')
+  assert.equal(result.documents[0].documentId, 'doc-1')
+})
+
+const SPREADSHEET = {
+  id: 'sheet-1',
+  title: '待办事项列表',
+  sheets: [
+    { title: 'Sheet1', values: [['任务', '状态'], ['写代码', '完成'], ['写测试', '进行中']] },
+    { title: '归档', values: [['旧任务']] },
+  ],
+}
+
+const DECK = {
+  id: 'deck-1',
+  title: 'Demo Deck',
+  slides: [
+    { objectId: 'slide-1', placeholder: 'TITLE', texts: ['Hello deck\n'] },
+    { objectId: 'slide-2', texts: ['Bullet one\nBullet two\n'] },
+  ],
+}
+
+test('Google adapter: reads a spreadsheet as one table block per sheet', async (t) => {
+  const google = await startFakeGoogle({ spreadsheets: [SPREADSHEET] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const snapshot = await adapter.read({ platform: 'google-docs', documentId: 'sheet-1' }, {})
+  assert.equal(snapshot.title, '待办事项列表')
+  assert.equal(snapshot.tabs.length, 2)
+  assert.equal(snapshot.tabs[0].title, 'Sheet1')
+  assert.deepEqual(snapshot.tabs[0].blocks[0], {
+    type: 'table',
+    rows: [['任务', '状态'], ['写代码', '完成'], ['写测试', '进行中']],
+  })
+  assert.equal(snapshot.tabs[1].title, '归档')
+  assert.match(snapshot.url, /spreadsheets\/d\/sheet-1\/edit/)
+})
+
+test('Google adapter: reads a presentation as one tab per slide', async (t) => {
+  const google = await startFakeGoogle({ presentations: [DECK] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const snapshot = await adapter.read({ platform: 'google-docs', documentId: 'deck-1' }, {})
+  assert.equal(snapshot.title, 'Demo Deck')
+  assert.equal(snapshot.tabs.length, 2)
+  assert.deepEqual(snapshot.tabs[0].blocks, [{ type: 'heading', level: 1, text: 'Hello deck' }])
+  assert.equal(snapshot.tabs[0].title, 'Hello deck')
+  assert.deepEqual(snapshot.tabs[1].blocks, [
+    { type: 'paragraph', text: 'Bullet one' },
+    { type: 'paragraph', text: 'Bullet two' },
+  ])
+  assert.match(snapshot.url, /presentation\/d\/deck-1\/edit/)
+})
+
+test('Google adapter: slides replace works and sheets replace points at docs_sheet_update', async (t) => {
+  const google = await startFakeGoogle({ spreadsheets: [SPREADSHEET], presentations: [DECK] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const replaced = await adapter.replace({ platform: 'google-docs', documentId: 'deck-1' }, { find: 'Bullet', replace: 'Point' })
+  assert.equal(replaced.occurrencesChanged, 2)
+  assert.match(replaced.url, /presentation\/d\/deck-1\/edit/)
+  const deck = google.workspace.decks.get('deck-1')
+  assert.equal(deck.slides[1].pageElements[0].shape.text.textElements[0].textRun.content, 'Point one\nPoint two\n')
+
+  await assert.rejects(
+    () => adapter.replace({ platform: 'google-docs', documentId: 'sheet-1' }, { find: 'a', replace: 'b' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+      assert.match(error.hint, /docs_sheet_update/)
+      return true
+    },
+  )
+})
+
+test('Google adapter: writes one A1 range and appends rows', async (t) => {
+  const google = await startFakeGoogle({ spreadsheets: [SPREADSHEET] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const ref = { platform: 'google-docs', documentId: 'sheet-1' }
+  const updated = await adapter.updateValues(ref, { range: 'Sheet1!B3', values: [['已完成']] })
+  assert.equal(updated.updatedRows, 1)
+  assert.equal(updated.updatedCells, 1)
+  assert.match(updated.range, /Sheet1/)
+  assert.equal(google.workspace.sheets.get('sheet-1').sheets[0].values[2][1], '已完成')
+
+  const appended = await adapter.appendValues(ref, { values: [['新任务', '待办']] })
+  assert.equal(appended.updatedRows, 1)
+  assert.match(appended.url, /spreadsheets\/d\/sheet-1\/edit/)
+  assert.match(appended.range, /^'Sheet1'!/)
+  const values = google.workspace.sheets.get('sheet-1').sheets[0].values
+  assert.deepEqual(values.at(-1), ['新任务', '待办'])
+
+  await assert.rejects(
+    () => adapter.appendValues(ref, { values: 'not-a-matrix' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      return true
+    },
+  )
+})
+
+test('Google adapter: cells cannot be written to a Docs document', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  await assert.rejects(
+    () => adapter.updateValues(DOC_REF, { range: 'A1', values: [['x']] }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.hint, /docs_append|docs_insert/)
+      return true
+    },
+  )
+})
+
+test('Google adapter: an unsupported file kind is rejected as UNSUPPORTED', async (t) => {
+  const google = await startFakeGoogle({
+    files: [{ id: 'pdf-1', name: 'report.pdf', mimeType: 'application/pdf' }],
+  })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  await assert.rejects(
+    () => adapter.read({ platform: 'google-docs', documentId: 'pdf-1' }, {}),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+      assert.match(error.hint, /Only Google Docs, Google Sheets, and Google Slides/)
+      return true
+    },
+  )
+})
+
+test('Google adapter: sheet and slide URLs parse into references', async () => {
+  const { parseGoogleRef } = await import('../lib/adapters/google/convert.js')
+  const sheet = parseGoogleRef('https://docs.google.com/spreadsheets/d/abc123/edit#gid=0')
+  assert.deepEqual(sheet, { documentId: 'abc123', url: 'https://docs.google.com/spreadsheets/d/abc123/edit' })
+  const deck = parseGoogleRef('https://docs.google.com/presentation/d/xyz789/edit')
+  assert.deepEqual(deck, { documentId: 'xyz789', url: 'https://docs.google.com/presentation/d/xyz789/edit' })
+})
+
+test('Google adapter: appends text to a slide shape and validates the target', async (t) => {
+  const google = await startFakeGoogle({ presentations: [DECK] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  const ref = { platform: 'google-docs', documentId: 'deck-1' }
+
+  const first = await adapter.insertSlideText(ref, { text: ' (appended)' })
+  assert.equal(first.slide, 'slide-1')
+  assert.equal(first.shape, 'element-0-0')
+  assert.equal(first.insertedChars, 11)
+
+  const second = await adapter.insertSlideText(ref, { slide: '1', text: '!!' })
+  assert.equal(second.slide, 'slide-2')
+  const deck = google.workspace.decks.get('deck-1')
+  assert.equal(deck.slides[0].pageElements[0].shape.text.textElements[0].textRun.content, 'Hello deck\n (appended)')
+  assert.equal(deck.slides[1].pageElements[0].shape.text.textElements[0].textRun.content, 'Bullet one\nBullet two\n!!')
+
+  await assert.rejects(
+    () => adapter.insertSlideText(ref, { slide: 'nope', text: 'x' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.hint, /0=slide-1, 1=slide-2/)
+      return true
+    },
+  )
+
+  await assert.rejects(
+    () => adapter.insertSlideText(DOC_REF, { text: 'x' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.message, /only be inserted into a Google Slides presentation/)
+      return true
+    },
+  )
+
+  await assert.rejects(
+    () => adapter.insertSlideText(ref, { text: '   ' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      return true
+    },
+  )
+})
+
+test('Google adapter: creates a spreadsheet with named sheets and values', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  const created = await adapter.create({
+    kind: 'spreadsheet',
+    title: 'Q4 导入测试',
+    sheets: [
+      { title: '进度总览', values: [['标题'], ['进展']] },
+      { title: '空表', values: [] },
+    ],
+  })
+  assert.match(created.documentId, /^created-sheet-/)
+  assert.match(created.url, /spreadsheets\/d\//)
+  assert.deepEqual(created.tabs, ['进度总览', '空表'])
+
+  const stored = google.workspace.sheets.get(created.documentId)
+  assert.deepEqual(stored.sheets.map((sheet) => sheet.properties.title), ['进度总览', '空表'])
+  assert.deepEqual(stored.sheets[0].values, [['标题'], ['进展']])
+  assert.deepEqual(stored.sheets[1].values, [])
+
+  const read = await adapter.read({ platform: 'google-docs', documentId: created.documentId }, {})
+  assert.equal(read.tabs.length, 2)
+  assert.equal(read.tabs[0].title, '进度总览')
+  assert.deepEqual(read.tabs[0].blocks[0].rows, [['标题'], ['进展']])
+  assert.deepEqual(read.tabs[1].blocks, [{ type: 'paragraph', text: '(empty sheet)' }])
+
+  const listed = await adapter.list({ type: 'spreadsheet' })
+  assert.ok(listed.documents.some((doc) => doc.documentId === created.documentId))
+})
+
+test('Google adapter: spreadsheet create rejects duplicate or empty sheet titles', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+
+  await assert.rejects(
+    () => adapter.create({ kind: 'spreadsheet', title: 'X', sheets: [{ title: 'A' }, { title: 'A' }] }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.message, /duplicate sheet title/)
+      return true
+    },
+  )
+  await assert.rejects(
+    () => adapter.create({ kind: 'spreadsheet', title: 'X', sheets: [{ values: [['a']] }] }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.message, /title must not be empty/)
+      return true
+    },
+  )
+  await assert.rejects(
+    () => adapter.create({ kind: 'presentation', title: 'X' }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+      assert.match(error.hint, /document .*spreadsheet/)
+      return true
+    },
+  )
+})
+
+test('Google adapter: applies raw batchUpdate formatting requests', async (t) => {
+  const google = await startFakeGoogle({ spreadsheets: [SPREADSHEET] })
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  const ref = { platform: 'google-docs', documentId: 'sheet-1' }
+
+  const requests = [
+    {
+      repeatCell: {
+        range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1 },
+        cellFormat: { textFormat: { bold: true }, backgroundColor: { red: 0.27, green: 0.33, blue: 0.42 } },
+        fields: 'userEnteredFormat(textFormat,backgroundColor)',
+      },
+    },
+    { updateSheetProperties: { properties: { sheetId: 0, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } },
+    { mergeCells: { range: { sheetId: 0, startRowIndex: 0, endRowIndex: 1, startColumnIndex: 0, endColumnIndex: 2 }, mergeType: 'MERGE_ALL' } },
+  ]
+  const result = await adapter.formatSheet(ref, { requests })
+  assert.equal(result.replies.length, 3)
+  assert.match(result.url, /spreadsheets\/d\/sheet-1\/edit/)
+  assert.equal(google.workspace.applied.length, 3)
+  assert.equal(google.workspace.applied[0].repeatCell.cellFormat.textFormat.bold, true)
+
+  await assert.rejects(
+    () => adapter.formatSheet(ref, { requests: [] }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.hint, /repeatCell/)
+      return true
+    },
+  )
+  await assert.rejects(
+    () => adapter.formatSheet(DOC_REF, { requests }),
+    (error) => {
+      assert.equal(error.code, DOCS_ERROR.INVALID_INPUT)
+      assert.match(error.message, /formatting applies to a Google Sheet only/)
+      return true
+    },
+  )
 })

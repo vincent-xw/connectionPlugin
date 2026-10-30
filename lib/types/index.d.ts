@@ -54,6 +54,35 @@ export interface DocumentSnapshot {
   raw?: unknown
 }
 
+/** One entry in a platform document listing. */
+export interface DocumentSummary {
+  /** Platform-native document id, usable as a `docs_read` reference. */
+  documentId: string
+  title: string
+  url?: string
+  mimeType?: string
+  /** ISO 8601 timestamp reported by the platform. */
+  modifiedTime?: string
+}
+
+/** Request passed to {@link DocumentAdapter.list}. */
+export interface ListRequest {
+  account?: string
+  /** Page size, already bounded by the service. */
+  limit?: number
+  pageToken?: string
+  /** Free-text title filter, when the platform supports one. */
+  query?: string
+  /** Platform-specific kind ("document", "spreadsheet", ...); default is the platform's primary kind. */
+  type?: string
+}
+
+/** Result of {@link DocumentAdapter.list}. */
+export interface ListResult {
+  documents: DocumentSummary[]
+  nextPageToken?: string
+}
+
 export interface ReadOptions {
   tab?: string
   account?: string
@@ -87,6 +116,43 @@ export interface ReplaceRequest {
   expectedRevision?: string
 }
 
+/** Cell values as rows; a single row may be passed for convenience. */
+export type CellValues = Array<Array<string | number | boolean>> | Array<string | number | boolean>
+
+export interface CellUpdateRequest {
+  account?: string
+  /** A1 range including the sheet title, e.g. `Sheet1!A1:C3`. */
+  range: string
+  values: CellValues
+}
+
+export interface CellAppendRequest {
+  account?: string
+  /** Sheet title or A1 range; the first sheet when omitted. */
+  range?: string
+  values: CellValues
+}
+
+/** Raw Google Sheets batchUpdate requests. */
+export interface FormatRequest {
+  account?: string
+  requests: unknown[]
+}
+
+/** Result of a formatting call: the API replies, one per request. */
+export interface FormatResult {
+  url?: string
+  replies?: unknown[]
+}
+
+/** Result of a spreadsheet write, before identity is merged. */
+export interface CellWriteResult {
+  range?: string
+  updatedRows?: number
+  updatedColumns?: number
+  updatedCells?: number
+}
+
 /** Result of a read/create/append/insert/replace, before identity is merged. */
 export interface WriteResult {
   documentId?: string
@@ -100,6 +166,12 @@ export interface WriteResult {
 
 export interface AuthStatus {
   connected: boolean
+  /**
+   * True while an authorization flow started by `start()` is still open. When
+   * set, a still-valid older grant must not be reported as the result of that
+   * flow; `docs_connect` keeps waiting until the flow settles.
+   */
+  flowPending?: boolean
   account?: string
   /** Epoch milliseconds; the service converts it to ISO for tool output. */
   expiresAt?: number
@@ -125,10 +197,18 @@ export interface AdapterAuth {
 /** Declared capabilities; an omitted flag is inferred from the method. */
 export interface AdapterCapabilities {
   read?: boolean
+  /** Enables `docs_list`: the platform can enumerate the account's documents. */
+  list?: boolean
   create?: boolean
   append?: boolean
   insert?: boolean
   replace?: boolean
+  /** Enables `docs_sheet_update`: overwrite a cell range in a spreadsheet. */
+  updateValues?: boolean
+  /** Enables `docs_sheet_append`: append rows to a spreadsheet. */
+  appendValues?: boolean
+  /** Enables `docs_sheet_format`: raw Sheets batchUpdate (formatting, merges, dimensions). */
+  formatSheet?: boolean
   /** Enables `docs_invoke` through {@link DocumentAdapter.invoke}. */
   custom?: boolean
   auth?: boolean
@@ -161,6 +241,7 @@ export interface DocumentAdapter {
   formatRef?(ref: DocRef): string
 
   read?(ref: DocRef, options: ReadOptions, signal?: AbortSignal): Promise<DocumentSnapshot>
+  list?(request: ListRequest, signal?: AbortSignal): Promise<ListResult>
   create?(
     request: { title: string; text?: string; tabTitle?: string; account?: string },
     signal?: AbortSignal,
@@ -168,6 +249,9 @@ export interface DocumentAdapter {
   append?(ref: DocRef, request: AppendRequest, signal?: AbortSignal): Promise<WriteResult>
   insert?(ref: DocRef, request: InsertRequest, signal?: AbortSignal): Promise<WriteResult>
   replace?(ref: DocRef, request: ReplaceRequest, signal?: AbortSignal): Promise<WriteResult>
+  updateValues?(ref: DocRef, request: CellUpdateRequest, signal?: AbortSignal): Promise<CellWriteResult>
+  appendValues?(ref: DocRef, request: CellAppendRequest, signal?: AbortSignal): Promise<CellWriteResult>
+  formatSheet?(ref: DocRef, request: FormatRequest, signal?: AbortSignal): Promise<FormatResult>
   invoke?(
     ref: DocRef | null,
     request: { action: string; payload?: unknown; account?: string },
@@ -242,10 +326,14 @@ export interface DocsService {
   catalog(platform?: string, signal?: AbortSignal): Promise<unknown[]>
   authStatus(adapter: DocumentAdapter, account?: string, signal?: AbortSignal): Promise<AuthStatus & { supported: boolean }>
   read(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  list(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   create(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   append(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   insert(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   replace(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  updateValues(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  appendValues(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
+  formatSheet(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   connect(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   disconnect(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>
   invoke(request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>

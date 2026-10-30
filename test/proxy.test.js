@@ -43,7 +43,10 @@ test('Google config exposes proxy settings with modern defaults', () => {
   assert.equal(defaults.proxyFromEnv, true)
   assert.deepEqual(defaults.proxyBypass, [])
   assert.equal(defaults.guardWrites, true)
-  assert.deepEqual(defaults.scopes, [GOOGLE_DEFAULT_CONFIG.scopes[0]])
+  assert.deepEqual(defaults.scopes, [...GOOGLE_DEFAULT_CONFIG.scopes])
+  for (const scope of ['documents', 'spreadsheets', 'presentations', 'drive.metadata.readonly']) {
+    assert.ok(defaults.scopes.some((value) => value.endsWith(`auth/${scope}`)), scope)
+  }
 
   const configured = resolveGoogleConfig({
     proxy: 'http://127.0.0.1:7897',

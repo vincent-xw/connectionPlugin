@@ -151,6 +151,67 @@ test('DocsService reports unsupported capabilities and wraps adapter failures', 
   })
 })
 
+test('DocsService lists documents, bounds the page, and resolves missing URLs', async () => {
+  let seen
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  service.registerAdapter(makeAdapter('alpha', {
+    formatRef: (ref) => `alpha://${ref.documentId}`,
+    async list(request) {
+      seen = request
+      return {
+        documents: [
+          { documentId: 'doc-1', title: 'First', modifiedTime: '2026-10-01T00:00:00.000Z' },
+          { documentId: 'doc-2' },
+        ],
+        nextPageToken: 'page-2',
+      }
+    },
+  }), ctx)
+  const result = await service.list({ limit: 500, pageToken: 'page-1', query: '  First  ', account: 'work' })
+  assert.equal(seen.limit, 100)
+  assert.equal(seen.pageToken, 'page-1')
+  assert.equal(seen.query, 'First')
+  assert.equal(seen.account, 'work')
+  assert.equal(result.platform, 'alpha')
+  assert.equal(result.nextPageToken, 'page-2')
+  assert.deepEqual(result.documents[0], {
+    documentId: 'doc-1',
+    title: 'First',
+    url: 'alpha://doc-1',
+    modifiedTime: '2026-10-01T00:00:00.000Z',
+  })
+  assert.equal(result.documents[1].title, 'doc-2')
+  assert.equal(result.documents[1].url, 'alpha://doc-2')
+
+  const bounded = await service.list({})
+  assert.equal(seen.limit, 20)
+  assert.equal(bounded.documents.length, 2)
+})
+
+test('DocsService rejects a listing without identities and platforms without list', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  service.registerAdapter(makeAdapter('alpha', {
+    async list() {
+      return { documents: [{ title: 'no id' }] }
+    },
+  }), ctx)
+  await assert.rejects(() => service.list({}), (error) => {
+    assert.equal(error.code, DOCS_ERROR.UPSTREAM)
+    assert.match(error.message, /without documentId/)
+    return true
+  })
+
+  const readOnly = new DocsService(ctx, { defaultPlatform: 'readonly' })
+  readOnly.registerAdapter(makeAdapter('readonly'), ctx)
+  await assert.rejects(() => readOnly.list({}), (error) => {
+    assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+    assert.match(error.message, /does not support list/)
+    return true
+  })
+})
+
 test('DocsService connect returns a URL, reports pending, and honors already-connected', async () => {
   const ctx = fakeContext()
   const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
@@ -183,6 +244,80 @@ test('DocsService connect returns a URL, reports pending, and honors already-con
   const disconnected = await service.disconnect({})
   assert.equal(disconnected.connected, false)
   assert.equal(connected, false)
+})
+
+test('DocsService dispatches spreadsheet writes and reports missing capabilities', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  const seen = []
+  service.registerAdapter(makeAdapter('alpha', {
+    async updateValues(ref, request) {
+      seen.push(['update', ref.documentId, request])
+      return { range: 'Sheet1!A1', updatedRows: 1, updatedColumns: 2, updatedCells: 2 }
+    },
+    async appendValues(ref, request) {
+      seen.push(['append', ref.documentId, request])
+      return { range: "'Sheet1'!A9", updatedRows: 1 }
+    },
+  }), ctx)
+
+  const updated = await service.updateValues({ document: 'alpha:doc-1', range: 'Sheet1!A1', values: [['a', 'b']], account: 'work' })
+  assert.equal(seen[0][1], 'doc-1')
+  assert.equal(seen[0][2].range, 'Sheet1!A1')
+  assert.equal(seen[0][2].account, 'work')
+  assert.deepEqual(updated, {
+    platform: 'alpha',
+    documentId: 'doc-1',
+    range: 'Sheet1!A1',
+    updatedRows: 1,
+    updatedColumns: 2,
+    updatedCells: 2,
+  })
+
+  const appended = await service.appendValues({ document: 'alpha:doc-1', values: [['c']] })
+  assert.equal(appended.range, "'Sheet1'!A9")
+  assert.equal(appended.updatedCells, undefined)
+
+  const bare = new DocsService(ctx, { defaultPlatform: 'plain' })
+  bare.registerAdapter(makeAdapter('plain'), ctx)
+  await assert.rejects(() => bare.updateValues({ document: 'plain:doc-1', range: 'A1', values: [['x']] }), (error) => {
+    assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+    assert.match(error.message, /does not support updateValues/)
+    return true
+  })
+})
+
+test('DocsService connect does not mistake an older grant for the fresh flow', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  let connected = true
+  let flowPending = false
+  service.registerAdapter(makeAdapter('alpha', {
+    auth: {
+      async status() {
+        return { connected, flowPending }
+      },
+      async start() {
+        flowPending = true
+        return { url: 'https://example.test/auth' }
+      },
+      async disconnect() {
+        connected = false
+      },
+    },
+  }), ctx)
+
+  const first = await service.connect({ force: true, waitSeconds: 0 })
+  assert.equal(first.connected, false)
+  assert.equal(first.status, 'pending')
+  assert.match(first.url, /example\.test/)
+
+  setTimeout(() => {
+    flowPending = false
+  }, 100)
+  const second = await service.connect({ force: true, waitSeconds: 5 })
+  assert.equal(second.connected, true)
+  assert.equal(second.status, 'connected')
 })
 
 test('DocsService catalog reports capabilities and live auth state', async () => {

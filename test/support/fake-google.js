@@ -9,6 +9,7 @@
  */
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
+import { createWorkspaceState, handleWorkspaceRequest } from './fake-workspace.js'
 
 /** Turn plain tab text into Docs API paragraphs with coherent native indexes. */
 export function paragraphContent(text) {
@@ -37,6 +38,13 @@ function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/** Drive view path for a Google native MIME type. */
+function googleWebPath(mimeType) {
+  if (mimeType === 'application/vnd.google-apps.spreadsheet') return 'spreadsheets'
+  if (mimeType === 'application/vnd.google-apps.presentation') return 'presentation'
+  return 'document'
+}
+
 /** Read a request body as text. */
 function readBody(request) {
   return new Promise((resolve, reject) => {
@@ -60,20 +68,52 @@ function json(response, status, payload, headers = {}) {
  * @param {Array<{title: string, text: string}>} [options.tabs] - initial tabs.
  * @returns {Promise<object>} fake server handle.
  */
-export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Tab 1', text: 'Hello\n' }] } = {}) {
+export async function startFakeGoogle({
+  title = 'Test Doc',
+  tabs = [{ title: 'Tab 1', text: 'Hello\n' }],
+  files = [{ id: 'doc-1', name: 'Test Doc', mimeType: 'application/vnd.google-apps.document', modifiedTime: '2026-10-01T09:00:00.000Z' }],
+  spreadsheets = [],
+  presentations = [],
+  documentIdPrefix = '',
+} = {}) {
   let accessCounter = 0
   let documentCounter = 0
   const documents = new Map()
+  const driveFiles = [...files]
+  const driveRequests = []
   const accessTokens = new Set()
   const refreshTokens = new Set()
   const codes = new Map()
   const tokenRequests = []
   const failures = []
-  const settings = { omitWriteControl: false }
+  const settings = { omitWriteControl: false, driveForbidden: false }
+  const workspace = createWorkspaceState({
+    spreadsheets,
+    presentations,
+    registerFile: (id, name, mimeType) => {
+      if (!driveFiles.some((file) => file.id === id)) driveFiles.push({ id, name, mimeType })
+    },
+  })
+  // Fixtures are Drive files as well: `docs_list` reads the file list, and a
+  // fixture that only existed in the Sheets/Slides stores would be invisible.
+  for (const sheet of spreadsheets) {
+    if (!driveFiles.some((file) => file.id === sheet.id)) {
+      driveFiles.push({ id: sheet.id, name: sheet.title ?? sheet.id, mimeType: 'application/vnd.google-apps.spreadsheet' })
+    }
+  }
+  for (const deck of presentations) {
+    if (!driveFiles.some((file) => file.id === deck.id)) {
+      driveFiles.push({ id: deck.id, name: deck.title ?? deck.id, mimeType: 'application/vnd.google-apps.presentation' })
+    }
+  }
 
-  const createDocument = ({ initialTabs = [], documentTitle = title } = {}) => {
+  const createDocument = ({ initialTabs = [], documentTitle = title, registerFile = true } = {}) => {
     documentCounter += 1
-    const id = `doc-${documentCounter}`
+    // Real Drive ids are long; a caller that reads through the registry needs
+    // an id its reference parser accepts, so allow a realistic prefix.
+    const id = documentIdPrefix.length > 0
+      ? `${documentIdPrefix}${String(documentCounter).padStart(3, '0')}AbCdEfGhIjKlMnOp`
+      : `doc-${documentCounter}`
     const document = {
       documentId: id,
       title: documentTitle,
@@ -87,9 +127,14 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
       })),
     }
     documents.set(id, document)
+    // A created document is a real Drive file too: reads resolve kind from
+    // metadata, so keep the listing in sync with the document store.
+    if (registerFile && !driveFiles.some((file) => file.id === id)) {
+      driveFiles.push({ id, name: document.title, mimeType: 'application/vnd.google-apps.document' })
+    }
     return document
   }
-  createDocument({ initialTabs: tabs })
+  createDocument({ initialTabs: tabs, registerFile: false })
 
   const issueAccess = () => {
     accessCounter += 1
@@ -171,7 +216,7 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://127.0.0.1')
     const path = url.pathname
-    const bodyText = request.method === 'POST' ? await readBody(request) : ''
+    const bodyText = ['POST', 'PUT', 'PATCH'].includes(request.method) ? await readBody(request) : ''
 
     const queued = failures.findIndex((failure) => (failure.method === undefined || failure.method === request.method) && (failure.path === undefined || failure.path.test(path)))
     if (queued !== -1) {
@@ -225,6 +270,70 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
     const token = typeof authorized === 'string' && authorized.startsWith('Bearer ') ? authorized.slice(7) : undefined
     if (token === undefined || !accessTokens.has(token)) {
       json(response, 401, { error: { code: 401, message: 'Invalid Credentials', status: 'UNAUTHENTICATED' } })
+      return
+    }
+
+    // Drive metadata for plain fixture files (Sheets/Slides fall through to the
+    // workspace handler, which owns the kind-specific fixtures).
+    const metadataMatch = /^\/drive\/v3\/files\/([^/:]+)$/.exec(path)
+    if (metadataMatch !== null && request.method === 'GET') {
+      const id = decodeURIComponent(metadataMatch[1])
+      const file = driveFiles.find((entry) => entry.id === id)
+      if (file !== undefined) {
+        json(response, 200, {
+          id,
+          name: file.name,
+          mimeType: file.mimeType,
+          ...(file.modifiedTime === undefined ? {} : { modifiedTime: file.modifiedTime }),
+          trashed: false,
+        })
+        return
+      }
+    }
+
+    const workspaceResponse = handleWorkspaceRequest(workspace, { method: request.method, path, url, bodyText })
+    if (workspaceResponse !== undefined) {
+      json(response, workspaceResponse.status, workspaceResponse.payload)
+      return
+    }
+
+    if (path === '/drive/v3/files' && request.method === 'GET') {
+      const q = url.searchParams.get('q') ?? ''
+      driveRequests.push(Object.fromEntries(url.searchParams))
+      if (settings.driveForbidden) {
+        json(response, 403, {
+          error: {
+            code: 403,
+            message: 'Request had insufficient authentication scopes.',
+            status: 'PERMISSION_DENIED',
+            errors: [{ reason: 'insufficientPermissions', message: 'Insufficient Permission' }],
+          },
+        })
+        return
+      }
+      if (!/mimeType = 'application\/vnd\.google-apps\.[a-z]+'/.test(q)) {
+        json(response, 400, { error: { message: 'q must restrict mimeType to a Google native kind' } })
+        return
+      }
+      const nameMatch = /name contains '((?:[^'\\]|\\.)*)'/.exec(q)
+      const needle = nameMatch === null ? undefined : nameMatch[1].replace(/\\(.)/g, '$1').toLowerCase()
+      const wantedMimes = [...q.matchAll(/mimeType = '([^']*)'/g)].map((match) => match[1])
+      const pageSize = Math.max(1, Number(url.searchParams.get('pageSize') ?? 20))
+      const start = Math.max(0, Number(url.searchParams.get('pageToken') ?? 0) || 0)
+      const matched = driveFiles.filter((file) => (wantedMimes.length === 0 || wantedMimes.includes(file.mimeType))
+        && (needle === undefined || String(file.name).toLowerCase().includes(needle)))
+      const page = matched.slice(start, start + pageSize)
+      const next = start + pageSize < matched.length ? String(start + pageSize) : undefined
+      json(response, 200, {
+        files: page.map((file) => ({
+          id: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          ...(file.modifiedTime === undefined ? {} : { modifiedTime: file.modifiedTime }),
+          webViewLink: `https://docs.google.com/${googleWebPath(file.mimeType)}/d/${file.id}/edit`,
+        })),
+        ...(next === undefined ? {} : { nextPageToken: next }),
+      })
       return
     }
 
@@ -283,6 +392,9 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
   return {
     baseUrl,
     documents,
+    workspace,
+    driveFiles,
+    driveRequests,
     accessTokens,
     refreshTokens,
     tokenRequests,

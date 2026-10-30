@@ -30,8 +30,10 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ docs_* tools（lib/tools）                                    │
 │   docs_platforms / docs_connect / docs_disconnect            │
-│   docs_read / docs_create / docs_append                      │
-│   docs_insert / docs_replace / docs_invoke                   │
+│   docs_list / docs_read / docs_create / docs_append          │
+│   docs_insert / docs_replace / docs_sheet_update             │
+│   docs_sheet_append / docs_sheet_format                      │
+│   docs_slide_insert_text / docs_invoke                        │
 └───────────────────────────┬─────────────────────────────────┘
                             │  只依赖 ctx.docs（平台无关）
 ┌───────────────────────────▼─────────────────────────────────┐
@@ -119,22 +121,33 @@ dsh --profile docs-dev --port 0 --no-open     # 验证激活；Ctrl-C 退出
 ## 3. Google Cloud 准备
 
 1. 打开 [Google Cloud Console](https://console.cloud.google.com/)，创建/选择项目。
-2. **APIs & Services → Library** 启用 **Google Docs API**。
+2. **APIs & Services → Library** 按需启用：
+   - **Google Docs API**：读写 Docs（必需）
+   - **Google Sheets API**：读写表格单元格
+   - **Google Slides API**：读写幻灯片
+   - **Google Drive API**：`docs_list` 列文件、按 id 判断文件类型（只读 metadata）
 3. **Google Auth platform** 配置应用名称、支持邮箱、Audience（External + Testing 时添加测试用户）、Data Access scopes。
 4. **Clients → Create client**：
    - 本机 Harness 用 **Desktop app**（最简单，loopback 端口不需要预先登记）。
    - 如果要接远程/固定回调，用 **Web application**，并把 `http://127.0.0.1:<port>/` 登记为 redirect URI。
 5. 记下 `client_id`；桌面客户端通常也需要 `client_secret`（Google 的 token 端点会要求）。
 
-Scopes（默认只申请最小集）：
+Scopes（默认申请两个，都是最小集）：
 
 | scope | 用途 |
 | --- | --- |
-| `https://www.googleapis.com/auth/documents` | 读写文档（默认） |
+| `https://www.googleapis.com/auth/documents` | 读写 Docs（默认） |
+| `https://www.googleapis.com/auth/spreadsheets` | 读写 Google 表格单元格（默认） |
+| `https://www.googleapis.com/auth/presentations` | 读写 Google 幻灯片（默认） |
+| `https://www.googleapis.com/auth/drive.metadata.readonly` | `docs_list` 列文件 + 按 id 识别类型（默认） |
 | `https://www.googleapis.com/auth/documents.readonly` | 只读部署 |
 | `https://www.googleapis.com/auth/drive.file` | 只操作应用创建/经选择器授权的文件 |
 
-> 本插件第一期**不做 Drive 搜索/列表**，因此不需要启用 Google Drive API。`drive.file` 并不等于“知道 id 就有权限”。
+> 普通 txt 文件的内容读写需要 **`drive` / `drive.readonly`（受限 scope）**，当前版本**不支持**；`docs_list` 仍会列出它们，但 `docs_read` 会明确报 `UNSUPPORTED`。
+
+> 只读部署：把 `scopes` 换成 `documents.readonly` + `drive.metadata.readonly`。
+> 不想要“列文档”能力：从 `scopes` 里删掉 `drive.metadata.readonly`，`docs_list` 会以 `FORBIDDEN` + 重新授权提示失败（而不是偷偷放宽权限）。
+> 授权过的旧 token 不含新 scope，改 `scopes` 后必须 `docs_connect({ force: true })` 重新授权。
 
 ---
 
@@ -153,6 +166,7 @@ Scopes（默认只申请最小集）：
     proxyFromEnv: true
     scopes:
       - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/drive.metadata.readonly
     redirectPort: 0
     autoOpenBrowser: true
     guardWrites: true
@@ -221,7 +235,7 @@ curl -x http://127.0.0.1:7897 -m 15 -o /dev/null -w '%{http_code}\n' https://doc
 | `clientId` | `''` | OAuth client id（公开） |
 | `clientSecretRef` | `GOOGLE_DOCS_CLIENT_SECRET` | secret 的凭据引用名 |
 | `clientSecret` | `''` | 直接写 secret（不推荐） |
-| `scopes` | `[documents]` | 首次授权申请的 scope |
+| `scopes` | `[documents, spreadsheets, presentations, drive.metadata.readonly]` | 首次授权申请的 scope；删掉 Drive scope 即关闭 `docs_list`，删掉 sheets/slides 就只支持 Docs |
 | `account` | `default` | 默认账号标签 |
 | `redirectPort` | `0` | loopback 回调端口；0 自动选空闲端口 |
 | `redirectPath` | `/` | 当 `redirectUri` 为空时使用 |
@@ -238,6 +252,9 @@ curl -x http://127.0.0.1:7897 -m 15 -o /dev/null -w '%{http_code}\n' https://doc
 | `proxyFromEnv` | `true` | 无显式代理时读环境变量 |
 | `proxyBypass` | `[]` | 额外 NO_PROXY 主机 |
 | `apiBase` | `https://docs.googleapis.com` | 测试/网关可覆盖 |
+| `driveApiBase` | `https://www.googleapis.com` | Drive metadata / `docs_list`，测试/网关可覆盖 |
+| `sheetsApiBase` | `https://sheets.googleapis.com` | Sheets API，测试/网关可覆盖 |
+| `slidesApiBase` | `https://slides.googleapis.com` | Slides API，测试/网关可覆盖 |
 | `authEndpoint` / `tokenEndpoint` / `revokeEndpoint` | Google 官方 | 测试/私有网关可覆盖 |
 
 ---
@@ -278,6 +295,7 @@ docs_read({ document: "...", account: "work" })
 - 浏览器和 Harness 不在同一台机器时，loopback 回调无法到达。请把 Harness 跑在浏览器所在的机器，或改成同一网络内可访问的方案（当前版本只支持 loopback）。
 - 刷新失败（`invalid_grant`）会返回 `AUTH_REQUIRED`，重新 `docs_connect` 即可。
 - 只读 scope 下写文档会得到 `FORBIDDEN`，提示里会说明需要重新授权 `documents` scope。
+- 没有 `drive.metadata.readonly` 时调用 `docs_list` 会得到 `FORBIDDEN`，提示里会点名缺的 scope；`docs_connect({ force: true })` 重新授权即可（增量授权不会丢已有 scope）。
 
 ---
 
@@ -288,17 +306,26 @@ docs_read({ document: "...", account: "work" })
 | `docs_platforms` | 列出平台、能力、授权状态 | 工作流第一步；连接后复查 |
 | `docs_connect` | 启动授权 | 可带公开 `clientId`；`waitSeconds` 可等待 |
 | `docs_disconnect` | 删除本地授权 | 不影响文档本身 |
-| `docs_read` | 读取文档/单 Tab | 返回 title、revision、tabs、Markdown 正文 |
-| `docs_create` | 新建文档并写入正文 | Google 先 create 再 batchUpdate |
+| `docs_list` | 列出账号下的文档 | Google 走 Drive `files.list`（`drive.metadata.readonly`），按修改时间倒序；`type` 可选 `document`（默认）/ `spreadsheet`（Google 表格）/ `presentation` / `all`；支持 `query` 标题过滤与 `pageToken` 翻页 |
+| `docs_read` | 读取文档/单 Tab | 自动识别类型：Docs 渲染正文，表格每个 sheet 一张 Markdown 表，幻灯片每页一个 tab |
+| `docs_sheet_update` | 覆盖表格某个 A1 区域 | 例 `range: "Sheet1!A1:C3"`；返回实际更新的行列/单元格数 |
+| `docs_sheet_append` | 在表格末尾追加行 | 不传 `range` 时追加到第一个 sheet；必要时自动扩展行数 |
+| `docs_sheet_format` | 表格格式/结构（透传 Sheets batchUpdate） | `repeatCell`（格式写在 `cell.userEnteredFormat` 下，加粗/底色/边框/对齐/换行/数字格式）、`mergeCells`、`updateDimensionProperties`（列宽/行高）、`updateSheetProperties`（冻结行）、`addSheet`/`deleteSheet`；大批量用 `requestsFile` 读 JSON 清单（上限 5 MB） |
+| `docs_slide_insert_text` | 往幻灯片文本框末尾追加文字 | 目标页必须已有文本框（Slides API 不建形状）；`slide` 传 tab id 或 0-based 序号 |
+| `docs_create` | 新建文档 / 表格 | Docs：先 create 再 batchUpdate 写正文；Sheets：`kind: "spreadsheet"` + `sheets: [{ title, values }]`，按 RAW 写入、保留空表与表名 |
 | `docs_append` | 追加到 Tab 末尾 | 默认加前导换行；非幂等 |
 | `docs_insert` | 在原生 index 插入 | Google index 是 UTF-16 code unit |
 | `docs_replace` | 查找替换 | 不传 tab 时 Google 默认全 Tab；返回实际替换次数 |
-| `docs_invoke` | 平台私有操作 | Google：`getRaw` / `batchUpdate` / `createDocument` |
+| `docs_invoke` | 平台私有操作 | Google：`getRaw` / `batchUpdate` / `createDocument` / `listDocuments`（需 `allowRawActions`） |
+
+> 幻灯片写入有两条路径：`docs_replace` 全篇替换文本，`docs_slide_insert_text` 往指定页追加文本。
 
 ### 示例对话
 
 ```text
 用户：把这份文档里所有“待完成”改成“已完成”
+模型：docs_list({ type: "spreadsheet" })            // 找 Google 表格
+模型：docs_sheet_append({ document: "1lNQ…", values: [["买牛奶", "待办"]] })
 模型：docs_read({ document: "https://docs.google.com/document/d/..." })
       → revision r-123，2 个 Tab
 模型：docs_replace({ document: "...", find: "待完成", replace: "已完成", tab: "t.1", expectedRevision: "r-123" })
@@ -348,7 +375,8 @@ export function apply(ctx, config) {
 要点：
 
 - `registerAdapter(adapter, ctx)` 的第二个参数是**所有者 context**；adapter 会随该 plugin 卸载而自动注销。
-- `capabilities` 可省略；实现了方法就自动具备。
+- `capabilities` 可省略；实现了方法就自动具备（`list()` → `docs_list`，`updateValues()`/`appendValues()` → `docs_sheet_update`/`docs_sheet_append`）。
+- 一个 adapter 可以处理多种文件类型：Google adapter 就是 `read()` 里按 Drive metadata 返回的 MIME 类型分发到 Docs / Sheets / Slides。
 - `read()` 返回 `tabs`，每个 tab 提供 `blocks` 或 `text`，两者都有则 `text` 优先。
 - 写入方法只返回 `{ revision?, tab?, index?, occurrencesChanged?, insertedChars?, documentId? }`，身份字段由 core 合并。
 - 需要平台私有操作时实现 `invoke()`；它由 `docs_invoke` 暴露。
@@ -378,7 +406,9 @@ export function apply(ctx, config) {
 | `[NOT_CONFIGURED] the credential store is unavailable` | 当前 composition 没加载 `@deepseek-ai/dsh-credentials-local` |
 | 授权页打开后回调失败 | 浏览器与 Harness 不在同一台机器；只能 loopback |
 | `[AUTH_REQUIRED]` | token 过期/撤销；`docs_connect` 重连 |
-| `[FORBIDDEN]` | 账号没有文档权限，或 scope 不足（提示会区分） |
+| `[FORBIDDEN]` | 账号没有文档权限，或 scope 不足（提示会区分；`docs_list` 缺 Drive metadata scope 也在这里） |
+| `[NOT_CONFIGURED] ... has not been used in project ... or it is disabled` | 项目没启用对应 API：Docs 读写要 **Google Docs API**，表格要 **Google Sheets API**，幻灯片要 **Google Slides API**，`docs_list` 要 **Google Drive API**；启用后等 1–2 分钟重试 |
+| `[UNSUPPORTED] ... Only Google Docs, Google Sheets, and Google Slides` | 该 id 是上传的 Office/PDF 等非原生文件，当前不支持其内容读写 |
 | `[NOT_FOUND]` | id 错误，或账号看不到该文档（404 不等于不存在） |
 | `[REVISION_CONFLICT]` | 读取后文档被他人修改；重新 `docs_read` 后重算写入 |
 | `[RATE_LIMITED]` | 429；已按 Retry-After/指数退避重试，仍失败则等待后重试 |
@@ -394,20 +424,27 @@ export function apply(ctx, config) {
 npm test
 ```
 
-覆盖 45 个用例：
+覆盖 89 个用例：
 
 - Google 文档结构 → blocks/多 Tab/表格/标题/列表/链接。
+- 表格：结构 + 值读取、按 sheet 分 tab、200×30 截断说明、A1 区域覆盖、追加行。
+- 幻灯片：按页分 tab、标题占位符 → heading、全篇替换、按页追加文本。
+- 类型识别：Drive metadata 分发、旧授权降级、非原生文件报 `UNSUPPORTED`。
+- 端到端（`test/e2e-google.test.js`）：Service → adapter → 假 Google 的完整读写回读。
+- 装配冒烟（`test/plugin-boot.test.js`）：按 `cordis.patch.yml` 挂载三行，断言 13 个工具与全部能力，再用工具完成「列 → 读 → 写表格 / 读 → 写幻灯片」。
+- 建表：`spreadsheets.create` + `values:batchUpdate`（RAW），保留表名与空表，拒绝重复/空表名。
+- 格式：`docs_sheet_format` 透传 batchUpdate（含 `requestsFile` 读清单），非表格 id 与空 `requests` 会被拒。
 - 完整 OAuth：PKCE、授权码交换、state 不匹配、用户拒绝、断开。
 - Docs API：读取、追加、插入、Tab 级替换、创建（含新建 Tab）。
 - 401 刷新、429 重试、过期 revision 冲突。
 - HTTP CONNECT 与 SOCKS5 代理（真实隧道计数断言）。
 - Adapter 注册/能力推断/歧义解析/错误包装。
-- 9 个工具的 schema、参数校验、渲染、错误提示。
+- 14 个工具的 schema、参数校验、渲染、错误提示。
 
 另外完成：
 
 - 用真实 `@deepseek-ai/dsh-tools@0.2.1-rc.5` 的 `assertSupportedJsonSchema` / `validateJsonSchemaValue` 校验全部工具 schema 与样例输出。
-- 在独立 `docs-dev` profile 中真实启动 Harness，确认 9 个工具和 `google-docs` adapter 均注册成功；在真实 runtime 中执行 `docs_platforms`、`docs_read`、`docs_create`，验证返回结构与 `AUTH_REQUIRED` 提示。
+- 在独立 `docs-dev` profile 中真实启动 Harness，确认 14 个工具和 `google-docs` adapter 均注册成功；在真实 runtime 中执行 `docs_platforms`、`docs_list`、`docs_read`、`docs_create`、`docs_sheet_append`，验证返回结构与 `AUTH_REQUIRED` 提示。
 - 通过本机代理 `127.0.0.1:7897` 对 `https://docs.googleapis.com` 发起真实请求，返回 `401`（隧道 + TLS 正常）。
 
 ### 对照 Google 对接文档的验收清单

@@ -32,13 +32,20 @@
 | 能力 | 方法 | 工具 |
 | --- | --- | --- |
 | `read` | `read(ref, options, signal)` | `docs_read` |
+| `list` | `list(request, signal)` | `docs_list`（入参 `{ limit?, pageToken?, query?, type? }`，返回 `{ documents: [{ documentId, title, url?, mimeType?, modifiedTime? }], nextPageToken? }`；`type` 由平台定义词汇） |
 | `create` | `create(request, signal)` | `docs_create` |
 | `append` | `append(ref, request, signal)` | `docs_append` |
 | `insert` | `insert(ref, request, signal)` | `docs_insert` |
 | `replace` | `replace(ref, request, signal)` | `docs_replace` |
+| `updateValues` | `updateValues(ref, { range, values }, signal)` | `docs_sheet_update`（返回 `{ range?, updatedRows?, updatedColumns?, updatedCells? }`） |
+| `appendValues` | `appendValues(ref, { range?, values }, signal)` | `docs_sheet_append` |
+| `insertSlideText` | `insertSlideText(ref, { slide?, text }, signal)` | `docs_slide_insert_text`（返回 `{ slide?, shape?, insertedChars?, revision? }`） |
+| `formatSheet` | `formatSheet(ref, { requests }, signal)` | `docs_sheet_format`（透传 Sheets batchUpdate，返回 `{ url?, replies? }`） |
 | `custom` | `invoke(ref, {action,payload}, signal)` | `docs_invoke` |
 | `auth` | `auth.status/start/disconnect` | `docs_connect` / `docs_disconnect` |
 | `tabs` / `revisions` | 仅提示 | 工具描述/计划使用 |
+
+同一 adapter 可以覆盖多种文件类型：能力仍是这几个动词，`read()` 内部按文件类型分发即可（Google adapter 用 Drive metadata 的 MIME 判断 Docs / Sheets / Slides）。
 
 显式 `capabilities: { read: false }` 可以关闭自动推断。
 
