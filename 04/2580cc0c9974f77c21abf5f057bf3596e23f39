@@ -1,0 +1,82 @@
+.gitignore
+  h_959ffaaf5065b8 1
+index.js
+  s_649f087397dc14::t_23de768854c52d 1-15
+cordis.patch.yml
+  h_959ffaaf5065b8 1-56
+docs/google-docs-api-integration-guide.md
+  h_959ffaaf5065b8 1-347
+icon.svg
+  h_959ffaaf5065b8 1-23
+lib/adapters/google/auth.js
+  h_959ffaaf5065b8 1-644
+lib/adapters/google/client.js
+  h_959ffaaf5065b8 1-297
+lib/adapters/google/config.js
+  h_959ffaaf5065b8 1-90
+lib/adapters/google/convert.js
+  h_959ffaaf5065b8 1-248
+lib/adapters/google/index.js
+  h_959ffaaf5065b8 1-341
+lib/adapters/google/open-browser.js
+  h_959ffaaf5065b8 1-38
+lib/adapters/google/proxy-fetch.js
+  h_959ffaaf5065b8 1-535
+lib/core/document.js
+  h_959ffaaf5065b8 1-305
+lib/core/errors.js
+  h_959ffaaf5065b8 1-150
+lib/core/index.js
+  h_959ffaaf5065b8 1-39
+lib/core/registry.js
+  h_959ffaaf5065b8 1-306
+lib/core/service.js
+  h_959ffaaf5065b8 1-496
+lib/tool-kit.js
+  h_959ffaaf5065b8 1-190
+lib/tools/index.js
+  h_959ffaaf5065b8 1-613
+locale/en.json
+  h_959ffaaf5065b8 1-6
+locale/zh.json
+  h_959ffaaf5065b8 1-6
+package.json
+  h_959ffaaf5065b8 1-43
+test/document.test.js
+  h_959ffaaf5065b8 1-178
+test/google-adapter.test.js
+  h_959ffaaf5065b8 1-272
+test/proxy.test.js
+  h_959ffaaf5065b8 1-62
+test/registry.test.js
+  h_959ffaaf5065b8 1-222
+test/support/fake-google.js
+  h_959ffaaf5065b8 1-297
+test/support/memory-credentials.js
+  h_959ffaaf5065b8 1-97
+test/support/proxy.js
+  h_959ffaaf5065b8 1-109
+test/tools.test.js
+  h_959ffaaf5065b8 1-236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.2",
+  "base_commit_sha": "042580cc0c9974f77c21abf5f057bf3596e23f39",
+  "prompts": {},
+  "humans": {
+    "h_959ffaaf5065b8": {
+      "author": "vincent-xw <jiaxuewen2006@163.com>"
+    }
+  },
+  "sessions": {
+    "s_649f087397dc14": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b76-91af-7b91-ab41-aca498f63148",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "vincent-xw <jiaxuewen2006@163.com>"
+    }
+  }
+}
