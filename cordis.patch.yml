@@ -1,0 +1,56 @@
+# Docs Connector bundle.
+#
+# Rows are deliberately separate so each layer can be replaced on its own:
+#   docs-connector        the platform-neutral registry (`ctx.docs`)
+#   docs-connector-google the Google Docs adapter
+#   docs-connector-tools  the model-facing docs_* tools
+#
+# Add another platform by installing/adapter-package and inserting a row whose
+# module default-exports `{ apply }` and registers itself through ctx.docs.
+- insert:
+    - id: docs-connector
+      name: '@local/docs-connector'
+      config:
+        defaultPlatform: google-docs
+        maxReadChars: 60000
+        allowCustomActions: true
+
+    - id: docs-connector-google
+      name: '@local/docs-connector/adapters/google'
+      config:
+        # OAuth client id of a Google Cloud OAuth 2.0 client.  Create a
+        # "Desktop app" client and paste its id here (or leave it empty and set
+        # GOOGLE_DOCS_CLIENT_ID in the harness/home .env, or store it through
+        # the credentials store).
+        clientId: ''
+        # Reference used to resolve the client secret.  Desktop clients may
+        # also work with PKCE alone; provide the secret when Google requires it.
+        clientSecretRef: GOOGLE_DOCS_CLIENT_SECRET
+        # Local proxy for Google endpoints. Node's fetch does not honor
+        # HTTPS_PROXY by itself, so the adapter tunnels explicitly through this
+        # address (http/https CONNECT, or socks5). Set to "direct" to bypass,
+        # or leave empty to follow HTTPS_PROXY/HTTP_PROXY/ALL_PROXY.
+        proxy: http://127.0.0.1:7897
+        proxyFromEnv: true
+        # Scopes requested on the first authorization.  `documents` is required
+        # for create/edit; use `documents.readonly` for a read-only deployment.
+        scopes:
+          - https://www.googleapis.com/auth/documents
+        # 0 lets the OS pick a free loopback port (recommended for Desktop
+        # app clients).  Set a fixed port when the OAuth client requires a
+        # pre-registered http://127.0.0.1:<port> redirect.
+        redirectPort: 0
+        # Optional complete redirect URI.  When set it wins over
+        # redirectPort/redirectPath and must be pre-registered on the client.
+        redirectUri: ''
+        autoOpenBrowser: true
+        prompt: consent
+        timeoutMs: 30000
+        maxRetries: 2
+        guardWrites: true
+        allowRawActions: false
+
+    - id: docs-connector-tools
+      name: '@local/docs-connector/tools'
+      config:
+        readOnly: false

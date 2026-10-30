@@ -1,0 +1,222 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { AdapterRegistry, normalizeCapabilities, validateAdapter } from '../lib/core/registry.js'
+import { DocsService } from '../lib/core/service.js'
+import { DOCS_ERROR, DocsError } from '../lib/core/errors.js'
+import { fakeContext, testLogger } from './support/memory-credentials.js'
+
+function makeAdapter(id, overrides = {}) {
+  return {
+    id,
+    title: `${id} platform`,
+    refExample: `${id}:doc-1`,
+    parseRef: (input) => /^doc-[A-Za-z0-9]+$/.test(input) ? { documentId: input } : null,
+    formatRef: (ref) => `${id}://${ref.documentId}`,
+    async read(ref) {
+      return {
+        platform: id,
+        documentId: ref.documentId,
+        title: 'Adapter Doc',
+        revision: 'rev-1',
+        tabs: [{ id: 'tab-1', title: 'Tab 1', blocks: [{ type: 'paragraph', text: 'hello' }] }],
+      }
+    },
+    ...overrides,
+  }
+}
+
+test('capabilities are inferred from methods unless explicitly disabled', () => {
+  const readOnly = normalizeCapabilities({ read: async () => {}, create: async () => {} })
+  assert.equal(readOnly.read, true)
+  assert.equal(readOnly.create, true)
+  assert.equal(readOnly.replace, false)
+  const disabled = normalizeCapabilities({ read: async () => {}, capabilities: { read: false, create: true }, create: async () => {} })
+  assert.equal(disabled.read, false)
+  assert.equal(disabled.create, true)
+  assert.equal(normalizeCapabilities({ auth: { status() {}, start() {}, disconnect() {} }, read: async () => {} }).auth, true)
+})
+
+test('validateAdapter rejects a malformed contract', () => {
+  assert.throws(() => validateAdapter({ id: 'Bad ID', parseRef() {} }), (error) => error.code === DOCS_ERROR.INVALID_INPUT)
+  assert.throws(() => validateAdapter({ id: 'ok' }), /parseRef/)
+  assert.throws(() => validateAdapter({ id: 'ok', parseRef() {}, capabilities: { read: true } }), /declares "read"/)
+  assert.throws(() => validateAdapter({ id: 'ok', parseRef() {}, auth: { status() {} } }), /auth\.start/)
+})
+
+test('registry registers, rejects duplicates, and disposes idempotently', () => {
+  const registry = new AdapterRegistry()
+  const adapter = makeAdapter('alpha')
+  const dispose = registry.register(adapter)
+  assert.equal(registry.list().length, 1)
+  assert.equal(registry.get('alpha'), adapter)
+  assert.throws(() => registry.register(makeAdapter('alpha')), /already registered/)
+  dispose()
+  dispose()
+  assert.equal(registry.list().length, 0)
+})
+
+test('registry chooses a default platform, the only platform, or fails', () => {
+  const registry = new AdapterRegistry({ defaultPlatform: 'beta' })
+  registry.register(makeAdapter('alpha'))
+  assert.equal(registry.choose().id, 'alpha')
+  registry.register(makeAdapter('beta'))
+  assert.equal(registry.choose().id, 'beta')
+  assert.equal(registry.choose('alpha').id, 'alpha')
+  assert.throws(() => registry.choose('missing'), (error) => error.code === DOCS_ERROR.UNKNOWN_PLATFORM)
+
+  const ambiguous = new AdapterRegistry()
+  ambiguous.register(makeAdapter('one'))
+  ambiguous.register(makeAdapter('two'))
+  assert.throws(() => ambiguous.choose(), (error) => error.code === DOCS_ERROR.AMBIGUOUS_PLATFORM)
+  assert.throws(() => new AdapterRegistry().choose(), (error) => error.code === DOCS_ERROR.PLATFORM_UNAVAILABLE)
+})
+
+test('registry parses prefixed refs, platform-hinted refs, and rejects ambiguity', () => {
+  const registry = new AdapterRegistry()
+  registry.register(makeAdapter('alpha'))
+  const parsed = registry.parse('alpha:doc-9')
+  assert.equal(parsed.adapter.id, 'alpha')
+  assert.deepEqual(parsed.ref, { platform: 'alpha', documentId: 'doc-9' })
+  assert.equal(registry.parse('doc-7', 'alpha').ref.documentId, 'doc-7')
+  assert.throws(() => registry.parse('not-a-ref'), (error) => error.code === DOCS_ERROR.INVALID_REFERENCE)
+  assert.throws(() => registry.parse('doc-7', 'missing'), (error) => error.code === DOCS_ERROR.UNKNOWN_PLATFORM)
+
+  const both = new AdapterRegistry()
+  both.register(makeAdapter('one', { parseRef: () => ({ documentId: 'shared' }) }))
+  both.register(makeAdapter('two', { parseRef: () => ({ documentId: 'shared' }) }))
+  assert.throws(() => both.parse('shared'), (error) => error.code === DOCS_ERROR.AMBIGUOUS_PLATFORM)
+})
+
+test('DocsService dispatches read to the adapter and normalizes the result', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha', maxReadChars: 20 })
+  service.registerAdapter(makeAdapter('alpha'), ctx)
+  const result = await service.read({ document: 'alpha:doc-1' })
+  assert.equal(result.platform, 'alpha')
+  assert.equal(result.documentId, 'doc-1')
+  assert.equal(result.title, 'Adapter Doc')
+  assert.equal(result.revision, 'rev-1')
+  assert.equal(result.tabs.length, 1)
+  assert.match(result.text, /hello/)
+  assert.equal(result.truncated, false)
+})
+
+test('DocsService scopes read to a tab and passes the account through', async () => {
+  let seen
+  const ctx = fakeContext()
+  const adapter = makeAdapter('alpha', {
+    async read(ref, options) {
+      seen = options
+      return {
+        platform: 'alpha',
+        documentId: ref.documentId,
+        title: 'Two Tabs',
+        tabs: [
+          { id: 't.0', title: 'One', blocks: [{ type: 'paragraph', text: 'first' }] },
+          { id: 't.1', title: 'Two', blocks: [{ type: 'paragraph', text: 'second' }] },
+        ],
+      }
+    },
+  })
+  const service = new DocsService(ctx, {})
+  service.registerAdapter(adapter, ctx)
+  const result = await service.read({ document: 'alpha:doc-1', tab: 'Two', account: 'work' })
+  assert.equal(seen.account, 'work')
+  assert.equal(result.text, 'second')
+  assert.equal(result.tabs.length, 2)
+  await assert.rejects(() => service.read({ document: 'alpha:doc-1', tab: 'missing' }), /no tab matches/)
+})
+
+test('DocsService reports unsupported capabilities and wraps adapter failures', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, {})
+  service.registerAdapter(makeAdapter('alpha'), ctx)
+  await assert.rejects(() => service.create({ title: 'x' }), (error) => {
+    assert.equal(error.code, DOCS_ERROR.UNSUPPORTED)
+    assert.match(error.message, /does not support create/)
+    return true
+  })
+
+  const failing = makeAdapter('beta', {
+    async read() {
+      throw new Error('upstream exploded')
+    },
+  })
+  service.registerAdapter(failing, ctx)
+  await assert.rejects(() => service.read({ document: 'beta:doc-1' }), (error) => {
+    assert.ok(error instanceof DocsError)
+    assert.equal(error.code, DOCS_ERROR.UPSTREAM)
+    assert.equal(error.platform, 'beta')
+    return true
+  })
+})
+
+test('DocsService connect returns a URL, reports pending, and honors already-connected', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  let connected = false
+  const adapter = makeAdapter('alpha', {
+    auth: {
+      defaultAccount: 'default',
+      async status({ account }) {
+        return { connected, account }
+      },
+      async start({ account }) {
+        return { url: 'https://example.test/auth', account, expiresAt: Date.now() + 1000 }
+      },
+      async disconnect() {
+        connected = false
+      },
+    },
+  })
+  service.registerAdapter(adapter, ctx)
+  const pending = await service.connect({ waitSeconds: 0 })
+  assert.equal(pending.connected, false)
+  assert.equal(pending.status, 'pending')
+  assert.equal(pending.url, 'https://example.test/auth')
+
+  connected = true
+  const again = await service.connect({})
+  assert.equal(again.connected, true)
+  assert.equal(again.alreadyConnected, true)
+
+  const disconnected = await service.disconnect({})
+  assert.equal(disconnected.connected, false)
+  assert.equal(connected, false)
+})
+
+test('DocsService catalog reports capabilities and live auth state', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  service.registerAdapter(makeAdapter('alpha', {
+    auth: {
+      async status() {
+        return { connected: true, account: 'default', expiresAt: Date.now() + 10000 }
+      },
+      async start() {
+        return { url: 'https://example.test/auth' }
+      },
+      async disconnect() {},
+    },
+  }), ctx)
+  const catalog = await service.catalog()
+  assert.equal(catalog.length, 1)
+  assert.equal(catalog[0].id, 'alpha')
+  assert.equal(catalog[0].default, true)
+  assert.equal(catalog[0].capabilities.read, true)
+  assert.equal(catalog[0].auth.connected, true)
+  assert.equal(typeof catalog[0].auth.expiresAt, 'string')
+})
+
+test('DocsService invoke is gated by allowCustomActions and capability', async () => {
+  const ctx = fakeContext()
+  const adapter = makeAdapter('alpha', { async invoke() { return { ok: true } } })
+  const blocked = new DocsService(ctx, { allowCustomActions: false })
+  blocked.registerAdapter(adapter, ctx)
+  await assert.rejects(() => blocked.invoke({ action: 'ping' }), (error) => error.code === DOCS_ERROR.UNSUPPORTED)
+
+  const allowed = new DocsService(ctx, { allowCustomActions: true })
+  allowed.registerAdapter(adapter, ctx)
+  const result = await allowed.invoke({ action: 'ping' })
+  assert.deepEqual(result, { platform: 'alpha', action: 'ping', result: { ok: true } })
+})

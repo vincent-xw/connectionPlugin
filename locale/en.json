@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Docs Connector",
+    "description": "Connects external document platforms such as Google Docs and reads, creates, and edits their documents through pluggable adapters."
+  }
+}

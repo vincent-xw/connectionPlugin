@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "文档连接器",
+    "description": "通过可插拔的 Adapter 连接 Google Docs 等外部文档平台，读取、创建和编辑文档。"
+  }
+}

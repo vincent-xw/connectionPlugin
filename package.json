@@ -1,0 +1,43 @@
+{
+  "name": "@local/docs-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Connect external document platforms (Google Docs first) to DeepSeek Harness through a free-form adapter layer.",
+  "type": "module",
+  "main": "index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./index.js"
+    },
+    "./core": "./lib/core/index.js",
+    "./adapters/google": "./lib/adapters/google/index.js",
+    "./tools": "./lib/tools/index.js",
+    "./types": "./lib/types/index.d.ts",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/**/*.js",
+    "lib/types/**/*.d.ts",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:watch": "node --test --watch test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20.10"
+  },
+  "license": "MIT"
+}
