@@ -5,8 +5,8 @@
 #   docs-connector-google the Google Docs adapter
 #   docs-connector-tools  the model-facing docs_* tools
 #
-# Add another platform by installing/adapter-package and inserting a row whose
-# module default-exports `{ apply }` and registers itself through ctx.docs.
+# Add another platform by installing an adapter package and inserting a row
+# whose module exports `apply` and registers itself through ctx.docs.
 - insert:
     - id: docs-connector
       name: '@local/docs-connector'
@@ -48,6 +48,7 @@
         timeoutMs: 30000
         maxRetries: 2
         guardWrites: true
+        refreshRevisionAfterWrite: true
         allowRawActions: false
 
     - id: docs-connector-tools

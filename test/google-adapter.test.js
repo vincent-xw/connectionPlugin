@@ -201,7 +201,9 @@ test('Google Docs adapter: reports an authorization denial without connecting', 
   callback.searchParams.set('error_description', 'The user denied the request')
   const response = await fetch(callback)
   assert.equal(response.status, 400)
-  assert.equal((await auth.status()).connected, false)
+  const status = await auth.status()
+  assert.equal(status.connected, false)
+  assert.match(status.detail, /denied/)
 })
 
 test('Google Docs adapter: disconnect deletes the grant', async (t) => {
@@ -269,4 +271,35 @@ test('proxy transport: SOCKS5 carries Docs API traffic', async (t) => {
   const snapshot = await adapter.read(DOC_REF, {})
   assert.equal(snapshot.title, 'Test Doc')
   assert.ok(proxy.stats.tunnels >= 2, `expected tunnels, saw ${proxy.stats.tunnels}`)
+})
+
+test('Google Docs adapter: a public client id supplied at connect time is remembered', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { credentials, auth, adapter } = await setup(google, { clientId: '' }, t)
+  const started = await auth.start({ clientId: CLIENT_ID })
+  assert.equal(await auth.clientId(), CLIENT_ID)
+  assert.equal(credentials.records.get('docs-connector/google-docs-config').payload.clientId, CLIENT_ID)
+  const url = new URL(started.url)
+  const challenge = url.searchParams.get('code_challenge')
+  google.addCode('code-2', { clientId: CLIENT_ID, challenge })
+  const callback = new URL(url.searchParams.get('redirect_uri'))
+  callback.searchParams.set('code', 'code-2')
+  callback.searchParams.set('state', url.searchParams.get('state'))
+  const response = await fetch(callback)
+  assert.equal(response.status, 200)
+  const snapshot = await adapter.read(DOC_REF, {})
+  assert.equal(snapshot.title, 'Test Doc')
+})
+
+
+test('Google Docs adapter: re-reads the revision when batchUpdate omits writeControl', async (t) => {
+  const google = await startFakeGoogle()
+  t.after(() => google.close())
+  const { auth, adapter } = await setup(google, {}, t)
+  await authorize(google, auth)
+  google.settings.omitWriteControl = true
+  const appended = await adapter.append(DOC_REF, { text: 'no revision echoed' })
+  assert.equal(appended.revision, 'rev-2')
+  google.settings.omitWriteControl = false
 })

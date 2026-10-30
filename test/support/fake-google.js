@@ -69,6 +69,7 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
   const codes = new Map()
   const tokenRequests = []
   const failures = []
+  const settings = { omitWriteControl: false }
 
   const createDocument = ({ initialTabs = [], documentTitle = title } = {}) => {
     documentCounter += 1
@@ -157,7 +158,14 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
       return { status: 400, payload: { error: { message: `unsupported request ${Object.keys(request)[0]}` } } }
     }
     document.revision += 1
-    return { status: 200, payload: { documentId: document.documentId, replies, writeControl: { requiredRevisionId: `rev-${document.revision}` } } }
+    return {
+      status: 200,
+      payload: {
+        documentId: document.documentId,
+        replies,
+        ...(settings.omitWriteControl ? {} : { writeControl: { requiredRevisionId: `rev-${document.revision}` } }),
+      },
+    }
   }
 
   const server = createServer(async (request, response) => {
@@ -279,6 +287,7 @@ export async function startFakeGoogle({ title = 'Test Doc', tabs = [{ title: 'Ta
     refreshTokens,
     tokenRequests,
     failures,
+    settings,
     codes,
     state: { documents },
     addCode(code, { clientId, challenge }) {

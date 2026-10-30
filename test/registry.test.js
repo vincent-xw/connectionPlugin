@@ -220,3 +220,34 @@ test('DocsService invoke is gated by allowCustomActions and capability', async (
   const result = await allowed.invoke({ action: 'ping' })
   assert.deepEqual(result, { platform: 'alpha', action: 'ping', result: { ok: true } })
 })
+
+test('DocsService preserves duck-typed adapter error codes and hints', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, {})
+  service.registerAdapter(makeAdapter('alpha', {
+    async read() {
+      const error = new Error('token expired')
+      error.code = 'AUTH_REQUIRED'
+      error.platform = 'alpha'
+      error.hint = 'Call docs_connect.'
+      throw error
+    },
+  }), ctx)
+  await assert.rejects(() => service.read({ document: 'alpha:doc-1' }), (error) => {
+    assert.equal(error.code, DOCS_ERROR.AUTH_REQUIRED)
+    assert.equal(error.platform, 'alpha')
+    assert.equal(error.hint, 'Call docs_connect.')
+    return true
+  })
+  service.registerAdapter(makeAdapter('beta', {
+    async read() {
+      const error = new Error('disk says no')
+      error.code = 'ENOENT'
+      throw error
+    },
+  }), ctx)
+  await assert.rejects(() => service.read({ document: 'beta:doc-1' }), (error) => {
+    assert.equal(error.code, DOCS_ERROR.UPSTREAM)
+    return true
+  })
+})

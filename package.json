@@ -25,7 +25,9 @@
     "lib/types/**/*.d.ts",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "docs/*.md",
+    "README.md"
   ],
   "dsh": {
     "bundle": {
