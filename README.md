@@ -7,7 +7,7 @@
 - 包名：`@local/docs-connector`（本地 bundle，可按需改名发布）
 - 入口：`package.json` → `dsh.bundle.patch` → `cordis.patch.yml`
 - 依赖：**零运行时依赖**，不需要构建、不需要 `pnpm install` 插件自身
-- 当前验证：100 个自动化测试 + 真实 `@deepseek-ai/dsh-tools` schema 校验 + 真实 Harness profile 启动验证
+- 当前验证：102 个自动化测试 + 真实 `@deepseek-ai/dsh-tools` schema 校验 + 真实 Harness profile 启动验证
 
 ---
 
@@ -110,7 +110,7 @@ dsh --profile docs-dev --port 0 --no-open     # 验证激活；Ctrl-C 退出
 │   └── types/index.d.ts         # Adapter 公开类型契约
 ├── locale/{en,zh}.json          # 插件标题/描述
 ├── icon.svg
-├── test/                        # node:test，100 个用例
+├── test/                        # node:test，102 个用例
 └── docs/
     ├── google-docs-api-integration-guide.md
     └── adapter-authoring.md
@@ -427,7 +427,7 @@ export function apply(ctx, config) {
 npm test
 ```
 
-覆盖 100 个用例：
+覆盖 102 个用例：
 
 - Google 文档结构 → blocks/多 Tab/表格/标题/列表/链接。
 - 表格：结构 + 值读取、按 sheet 分 tab、200×30 截断说明、A1 区域覆盖、追加行。
@@ -439,7 +439,7 @@ npm test
 - 格式：`docs_sheet_format` 透传 batchUpdate（含 `requestsFile` 读清单），非表格 id 与空 `requests` 会被拒。
 - 完整 OAuth：PKCE、授权码交换、state 不匹配、用户拒绝、断开。
 - Docs API：读取、追加、插入、Tab 级替换、创建（含新建 Tab）。
-- 401 刷新、429 重试、过期 revision 冲突。
+- 401 刷新、429 重试、过期 revision 冲突；token refresh 在 CONNECT/TLS 失败时也会重试，避免一次代理抖动把整条授权链路打断。
 - 传输分层与写重试：CONNECT/TLS 失败（`WRITE_NOT_SENT`，安全重试）vs 请求已发出但响应丢失（`WRITE_RESULT_UNKNOWN`，不自动重试）；TLS 建立后的迟到错误不会被误判为“未发送”。
 - 建表/建文档部分成功：资源已创建但初始内容写入失败时，返回 `documentId` + `url` + `warning`，不再报“整体失败”。
 - HTTP CONNECT 与 SOCKS5 代理（真实隧道计数断言），以及 CONNECT 重置 / TLS 中断的 phase 标记。
