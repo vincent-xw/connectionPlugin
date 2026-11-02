@@ -10,8 +10,10 @@ import http from 'node:http'
 import net from 'node:net'
 
 /** Start an HTTP CONNECT proxy. */
-export async function startConnectProxy() {
+export async function startConnectProxy({ failFirst = 0, failTlsFirst = 0 } = {}) {
   const stats = { tunnels: 0, targets: [] }
+  let connectFailures = failFirst
+  let tlsFailures = failTlsFirst
   const server = http.createServer((_request, response) => {
     response.writeHead(400, { 'content-type': 'text/plain' })
     response.end('CONNECT only')
@@ -21,6 +23,16 @@ export async function startConnectProxy() {
     const port = Number(portText)
     stats.tunnels += 1
     stats.targets.push(`${host}:${port}`)
+    if (connectFailures > 0) {
+      connectFailures -= 1
+      clientSocket.destroy()
+      return
+    }
+    if (tlsFailures > 0) {
+      tlsFailures -= 1
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n', () => clientSocket.destroy())
+      return
+    }
     const upstream = net.connect(port, host, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (head.length > 0) upstream.write(head)

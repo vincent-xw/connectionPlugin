@@ -67,7 +67,7 @@ function fakeDocs(overrides = {}) {
     async create(request) {
       calls.push(['create', request])
       if (request.kind === 'spreadsheet') {
-        return { platform: 'fake', documentId: 'd3', url: 'fake://d3', tabs: ['Sheet1', 'Sheet2'] }
+        return { platform: 'fake', documentId: 'd3', url: 'fake://d3', tabs: ['Sheet1', 'Sheet2'], warning: 'initial values failed' }
       }
       return { platform: 'fake', documentId: 'd2', url: 'fake://d2', revision: 'r-2', tab: 't.0' }
     },
@@ -361,6 +361,7 @@ test('tools: docs_create forwards a spreadsheet kind and its sheets', async () =
   const [content] = definition.output.render({}, value)
   assert.match(content.text, /created: ok/)
   assert.match(content.text, /sheets: Sheet1 \| Sheet2/)
+  assert.match(content.text, /warning: initial values failed/)
 })
 
 test('tools: docs_sheet_format forwards raw requests and counts replies', async () => {

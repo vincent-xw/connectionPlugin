@@ -386,3 +386,17 @@ test('DocsService preserves duck-typed adapter error codes and hints', async () 
     return true
   })
 })
+
+test('DocsService keeps a partial-create warning instead of dropping it', async () => {
+  const ctx = fakeContext()
+  const service = new DocsService(ctx, { defaultPlatform: 'alpha' })
+  service.registerAdapter(makeAdapter('alpha', {
+    async create() {
+      return { documentId: 'doc-9', url: 'alpha://doc-9', warning: 'created, initial body failed' }
+    },
+  }), ctx)
+  const result = await service.create({ title: 'Notes' })
+  assert.equal(result.documentId, 'doc-9')
+  assert.equal(result.url, 'alpha://doc-9')
+  assert.equal(result.warning, 'created, initial body failed')
+})

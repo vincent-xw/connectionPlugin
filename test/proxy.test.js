@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parseProxy, redactProxy, resolveProxy } from '../lib/adapters/google/proxy-fetch.js'
+import { createProxiedFetch, parseProxy, redactProxy, resolveProxy } from '../lib/adapters/google/proxy-fetch.js'
+import { startConnectProxy } from './support/proxy.js'
 import { resolveGoogleConfig, GOOGLE_DEFAULT_CONFIG } from '../lib/adapters/google/config.js'
 
 test('parseProxy accepts http, https, and socks5 URLs with credentials', () => {
@@ -62,4 +63,27 @@ test('Google config exposes proxy settings with modern defaults', () => {
   assert.equal(configured.redirectPort, 1234)
   assert.equal(configured.maxRetries, 5)
   assert.equal(configured.timeoutMs, 1000)
+})
+
+
+test('proxy: a CONNECT reset before establishment is tagged phase=connect', async (t) => {
+  const proxy = await startConnectProxy({ failFirst: 1 })
+  t.after(() => proxy.close())
+  const proxied = createProxiedFetch({ proxy: `http://127.0.0.1:${proxy.port}`, proxyFromEnv: false })
+  await assert.rejects(proxied('https://example.com/'), (error) => {
+    assert.equal(error.phase, 'connect')
+    assert.equal(error.details.phase, 'connect')
+    return true
+  })
+})
+
+test('proxy: a tunnel closed during TLS is tagged phase=tls', async (t) => {
+  const proxy = await startConnectProxy({ failTlsFirst: 1 })
+  t.after(() => proxy.close())
+  const proxied = createProxiedFetch({ proxy: `http://127.0.0.1:${proxy.port}`, proxyFromEnv: false })
+  await assert.rejects(proxied('https://example.com/'), (error) => {
+    assert.equal(error.phase, 'tls')
+    assert.equal(error.details.phase, 'tls')
+    return true
+  })
 })

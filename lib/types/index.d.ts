@@ -162,6 +162,9 @@ export interface WriteResult {
   index?: number
   occurrencesChanged?: number
   insertedChars?: number
+  tabs?: string[]
+  /** Set when the resource was created but initial content could not be written. */
+  warning?: string
 }
 
 export interface AuthStatus {

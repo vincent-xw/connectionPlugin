@@ -302,7 +302,10 @@ const adapter = {
 通用工具层不会自动重试写操作。请在 adapter 内遵守：
 
 - 429/5xx 等**明确未生效**的响应可以有限重试；
-- 网络超时/断连属于“结果未知”，不要重试，抛 `UPSTREAM` 并提示先读文档确认。
+- **请求根本没发出去**（CONNECT/TLS 握手失败、连接被拒绝）是安全的，可以有限重试；
+- **请求已发出但响应丢失/超时**属于“结果未知”，不要重试，抛 `WRITE_RESULT_UNKNOWN` 并提示先读文档或列最近文件；
+- 如果连“是否发出”都无法判断，按结果未知处理；
+- 创建类操作如果资源已创建、只是初始内容写入失败，返回 `documentId`/`url` + `warning`，不要把整个创建报成失败。
 
 ### 5.4 文本与 Tab
 
@@ -344,6 +347,8 @@ throw new DocsError('document is not shared with this account', {
 | `REVISION_CONFLICT` | 写入基线过期 | 重新读取 |
 | `RATE_LIMITED` | 限流 | 退避后重试 |
 | `UPSTREAM` | 上游/网络失败 | 读可重试；写先确认 |
+| `WRITE_NOT_SENT` | 写请求未发出（握手/连接失败） | 可直接重试 |
+| `WRITE_RESULT_UNKNOWN` | 写请求可能已生效但响应丢失 | 先读/列，确认后再重试 |
 | `UNSUPPORTED` | 能力未实现 | 不要注册该能力 |
 | `INVALID_INPUT` | 参数/索引非法 | 修正参数 |
 

@@ -7,7 +7,7 @@
 - 包名：`@local/docs-connector`（本地 bundle，可按需改名发布）
 - 入口：`package.json` → `dsh.bundle.patch` → `cordis.patch.yml`
 - 依赖：**零运行时依赖**，不需要构建、不需要 `pnpm install` 插件自身
-- 当前验证：45 个自动化测试 + 真实 `@deepseek-ai/dsh-tools` schema 校验 + 真实 Harness profile 启动验证
+- 当前验证：100 个自动化测试 + 真实 `@deepseek-ai/dsh-tools` schema 校验 + 真实 Harness profile 启动验证
 
 ---
 
@@ -110,7 +110,7 @@ dsh --profile docs-dev --port 0 --no-open     # 验证激活；Ctrl-C 退出
 │   └── types/index.d.ts         # Adapter 公开类型契约
 ├── locale/{en,zh}.json          # 插件标题/描述
 ├── icon.svg
-├── test/                        # node:test，45 个用例
+├── test/                        # node:test，100 个用例
 └── docs/
     ├── google-docs-api-integration-guide.md
     └── adapter-authoring.md
@@ -413,8 +413,11 @@ export function apply(ctx, config) {
 | `[REVISION_CONFLICT]` | 读取后文档被他人修改；重新 `docs_read` 后重算写入 |
 | `[RATE_LIMITED]` | 429；已按 Retry-After/指数退避重试，仍失败则等待后重试 |
 | 无法访问 Google | 检查代理：`proxy` 配置、代理进程、`curl -x` 验证 |
-| 写入超时/断连 | 不要直接重试；先 `docs_read` 确认是否已生效 |
-| `[UPSTREAM] cannot reach the proxy` | 代理没启动或地址错误；临时设 `proxy: direct` 验证直连 |
+| 写入超时/断连 | 看错误码：`WRITE_NOT_SENT` 可直接重试；`WRITE_RESULT_UNKNOWN` 先 `docs_read`/`docs_list` 确认 |
+| `[WRITE_NOT_SENT]` | 请求没发出去（CONNECT/TLS 失败），插件已自动重试；仍失败说明代理持续不通，重试是安全的 |
+| `[WRITE_RESULT_UNKNOWN]` | 请求已发出但响应丢失，可能已生效；**不要直接重试**，先读文档/列最近文件 |
+| `[UPSTREAM] cannot open a tunnel through the proxy` | 代理没启动、地址错误或拒绝 CONNECT；临时设 `proxy: direct` 验证直连 |
+| `[UPSTREAM] the proxy tunnel ... closed before TLS` | 代理/出口的 TLS 抖动；插件会按 `maxRetries` 自动重试，持续出现就换代理节点 |
 
 ---
 
@@ -424,20 +427,22 @@ export function apply(ctx, config) {
 npm test
 ```
 
-覆盖 89 个用例：
+覆盖 100 个用例：
 
 - Google 文档结构 → blocks/多 Tab/表格/标题/列表/链接。
 - 表格：结构 + 值读取、按 sheet 分 tab、200×30 截断说明、A1 区域覆盖、追加行。
 - 幻灯片：按页分 tab、标题占位符 → heading、全篇替换、按页追加文本。
 - 类型识别：Drive metadata 分发、旧授权降级、非原生文件报 `UNSUPPORTED`。
 - 端到端（`test/e2e-google.test.js`）：Service → adapter → 假 Google 的完整读写回读。
-- 装配冒烟（`test/plugin-boot.test.js`）：按 `cordis.patch.yml` 挂载三行，断言 13 个工具与全部能力，再用工具完成「列 → 读 → 写表格 / 读 → 写幻灯片」。
+- 装配冒烟（`test/plugin-boot.test.js`）：按 `cordis.patch.yml` 挂载三行，断言 14 个工具与全部能力，再用工具完成「列 → 读 → 写表格 / 读 → 写幻灯片」。
 - 建表：`spreadsheets.create` + `values:batchUpdate`（RAW），保留表名与空表，拒绝重复/空表名。
 - 格式：`docs_sheet_format` 透传 batchUpdate（含 `requestsFile` 读清单），非表格 id 与空 `requests` 会被拒。
 - 完整 OAuth：PKCE、授权码交换、state 不匹配、用户拒绝、断开。
 - Docs API：读取、追加、插入、Tab 级替换、创建（含新建 Tab）。
 - 401 刷新、429 重试、过期 revision 冲突。
-- HTTP CONNECT 与 SOCKS5 代理（真实隧道计数断言）。
+- 传输分层与写重试：CONNECT/TLS 失败（`WRITE_NOT_SENT`，安全重试）vs 请求已发出但响应丢失（`WRITE_RESULT_UNKNOWN`，不自动重试）；TLS 建立后的迟到错误不会被误判为“未发送”。
+- 建表/建文档部分成功：资源已创建但初始内容写入失败时，返回 `documentId` + `url` + `warning`，不再报“整体失败”。
+- HTTP CONNECT 与 SOCKS5 代理（真实隧道计数断言），以及 CONNECT 重置 / TLS 中断的 phase 标记。
 - Adapter 注册/能力推断/歧义解析/错误包装。
 - 14 个工具的 schema、参数校验、渲染、错误提示。
 
